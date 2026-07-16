@@ -26,6 +26,7 @@ from config import (
     SKIP_PERSONAL_PAGES,
     SKIP_BLOCKED_POPUPS,
     SKIP_TEXTS,
+    SKIP_ACTIVITY_KEYWORDS,
     PAGE_LOAD_WAIT,
     BACK_WAIT,
 )
@@ -303,6 +304,12 @@ class TraversalEngine:
         activity, hierarchy = self._dump()
         if not hierarchy:
             return ("KNOWN", "")  # dump 失败，按已知处理避免误截图
+
+        # Activity级别跳过（发布/拍摄等功能页）
+        if activity and any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
+            print(f"  [SKIP] 功能页，跳过: {activity} (depth={depth})")
+            return ("KNOWN", "")
+
         fp = fingerprint.generate(hierarchy, activity)
 
         # 精确指纹已访问过 → 跳过
