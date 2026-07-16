@@ -250,13 +250,27 @@ class TraversalEngine:
             if not new_activity or new_activity == current_activity:
                 continue
 
-            # 跳出App → 快速回来
+            # 跳出App（广告等） → 等待回来或强制拉回
             if PACKAGE_NAME not in new_activity:
-                self._go_back()
-                time.sleep(BACK_WAIT)
+                # 等一下看是否自动回来
+                time.sleep(1.5)
+                now = metadata.get_current_activity(self.serial)
+                if not now or PACKAGE_NAME not in now:
+                    # 还在外部App，按返回键尝试回来
+                    for _ in range(3):
+                        self._go_back()
+                        time.sleep(BACK_WAIT)
+                        now = metadata.get_current_activity(self.serial)
+                        if now and PACKAGE_NAME in now:
+                            break
+                # 如果还是在外面，强制拉回
+                if not now or PACKAGE_NAME not in now:
+                    self._restart_app()
+                    time.sleep(1)
+                # 回到App了，但可能不在原页面，尝试回到current_activity
                 if not self._go_back_to_activity(current_activity):
-                    self._ensure_on_main_page()
-                    return
+                    # 回不到原页面，但还在App内，继续点下一个节点
+                    continue
                 continue
 
             # 跳到功能页 → 快速返回
