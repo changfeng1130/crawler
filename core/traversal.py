@@ -109,9 +109,13 @@ class TraversalEngine:
         每次从首页重新查找Tab列表，避免引用失效。
         """
         self._ensure_on_main_page()
-        time.sleep(0.5)
+        time.sleep(1.5)  # 等待首页Tab栏完全加载
 
         tabs = self._find_tabs()
+        if not tabs:
+            # 再等一次
+            time.sleep(1.5)
+            tabs = self._find_tabs()
         if not tabs:
             print(f"[WARN] 找不到Tab栏，跳过")
             return
@@ -213,28 +217,45 @@ class TraversalEngine:
                     return
                 continue
 
-            # 跳到功能页或已知Activity → 快速返回（一次返回键就够）
-            if any(kw in new_activity for kw in SKIP_ACTIVITY_KEYWORDS) or \
-               new_activity in self.visited_activities:
+            # 跳到功能页 → 快速返回
+            if any(kw in new_activity for kw in SKIP_ACTIVITY_KEYWORDS):
                 skipped += 1
                 self._go_back()
                 time.sleep(BACK_WAIT)
-                # 确认回来了
                 if metadata.get_current_activity(self.serial) != current_activity:
                     if not self._go_back_to_activity(current_activity):
                         return
                 continue
 
-            # === 新Activity！值得处理 ===
-            # 等待页面完全加载（只有新页面才等完整时间）
+            # 跳回首页Activity → 不处理（防止深入探索时无限循环）
+            if new_activity == self._main_activity():
+                skipped += 1
+                self._go_back()
+                time.sleep(BACK_WAIT)
+                continue
+
+            # === 到了新页面，检查布局指纹是否已见过 ===
             time.sleep(PAGE_LOAD_WAIT - 0.4)
             popup_handler.dismiss_popups(self.poco, max_attempts=2)
 
+            hierarchy = self._dump_hierarchy()
+            if not hierarchy:
+                self._go_back_to_activity(current_activity)
+                continue
+
+            fp = fingerprint.generate(hierarchy, new_activity)
+            if fp in self.visited_fingerprints:
+                # 布局指纹已见过（同模板不同内容），快速返回
+                skipped += 1
+                self._go_back_to_activity(current_activity)
+                continue
+
+            # 真正的新页面！
             self.visited_activities.add(new_activity)
             print(f"  [BFS] 节点{idx} -> {new_activity.split('/')[-1]}")
 
-            # 截图新页面
-            took = self._try_screenshot(new_activity, depth + 1)
+            # 截图（指纹已经算过了，直接用）
+            took = self._do_screenshot(new_activity, depth + 1, hierarchy, fp)
             if took:
                 discovered_pages.append(action)
 
@@ -280,6 +301,10 @@ class TraversalEngine:
     # 截图
     # ------------------------------------------------------------------
 
+    def _main_activity(self) -> str:
+        """返回App的主Activity全名"""
+        return f"{PACKAGE_NAME}/.MainActivityV2"
+
     def _try_screenshot(self, activity: str, depth: int) -> bool:
         """截图当前页面，布局指纹去重。"""
         hierarchy = self._dump_hierarchy()
@@ -293,9 +318,12 @@ class TraversalEngine:
         if fp in self.visited_fingerprints:
             return False
 
+        return self._do_screenshot(activity, depth, hierarchy, fp)
+
+    def _do_screenshot(self, activity: str, depth: int, hierarchy: dict, fp: str) -> bool:
+        """执行截图（指纹已计算好）"""
         self.visited_fingerprints.add(fp)
 
-        popup_handler.dismiss_popups(self.poco, max_attempts=2)
         if SKIP_BLOCKED_POPUPS and popup_handler.has_blocking_popup(self.poco):
             return False
 
@@ -365,6 +393,7 @@ class TraversalEngine:
         activity = metadata.get_current_activity(self.serial)
         if not activity or PACKAGE_NAME not in activity:
             self._restart_app()
+            time.sleep(1)
             return
         if any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
             for _ in range(3):
@@ -375,6 +404,7 @@ class TraversalEngine:
                     if not any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
                         return
             self._restart_app()
+            time.sleep(1)
 
     # ------------------------------------------------------------------
     # Tab

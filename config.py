@@ -48,7 +48,7 @@ SKIP_TEXTS = [
 ]
 
 # 需要跳过的Activity关键词（进入这些页面不截图不递归）
-SKIP_ACTIVITY_KEYWORDS = ["CenterPlus", "Publish", "Upload", "Editor", "Shoot", "Record"]
+SKIP_ACTIVITY_KEYWORDS = ["CenterPlus", "Publish", "Upload", "Editor", "Shoot", "Record", "LiveRoom"]
 
 # 弹窗关闭关键词（含冷启动引导：跳过广告/同意隐私协议/青少年模式）
 POPUP_CLOSE_KEYWORDS = [
