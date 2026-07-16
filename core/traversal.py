@@ -77,12 +77,40 @@ class TraversalEngine:
         if dismissed:
             print(f"[INFO] 关闭了 {dismissed} 个弹窗")
 
-        # Phase 1: 遍历底部 Tab；找不到 Tab 栏则直接对当前页 DFS
-        if not self._traverse_tabs():
+        # 确保在App主页面上（不在功能页/非主页面）
+        self._ensure_on_main_page()
+
+        # Phase 1: 遍历底部 Tab
+        tab_found = self._traverse_tabs()
+
+        # Phase 2: 如果Tab遍历无效果（没找到Tab或截图为0），直接DFS当前页
+        if not tab_found or self.screenshots_taken == 0:
+            print("[INFO] Tab遍历无效果，直接对当前页面DFS")
+            self._ensure_on_main_page()
+            self._lost = False
             self._dfs(depth=0)
 
         print(f"[DONE] 遍历完成，共截图 {self.screenshots_taken} 张")
         return self.screenshots_taken
+
+    def _ensure_on_main_page(self):
+        """确保当前在App主页面上，如果不在则重启"""
+        activity = metadata.get_current_activity(self.serial)
+        if not activity or PACKAGE_NAME not in activity:
+            self._restart_app()
+            return
+        # 如果在功能页（如发布页），返回到主页
+        if any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
+            print(f"[INFO] 当前在功能页 {activity}，返回主页...")
+            for _ in range(3):
+                self._go_back()
+                time.sleep(BACK_WAIT)
+                activity = metadata.get_current_activity(self.serial)
+                if activity and PACKAGE_NAME in activity:
+                    if not any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
+                        return
+            # 返回键无效，直接重启
+            self._restart_app()
 
     # ------------------------------------------------------------------
     # Tab 遍历
@@ -90,51 +118,74 @@ class TraversalEngine:
 
     def _traverse_tabs(self) -> bool:
         """遍历底部 Tab 栏的各个页面。返回是否找到 Tab 栏。"""
-        tab_bar = self._find_tab_bar()
-        if not tab_bar:
-            print("[INFO] 未找到底部 Tab 栏，跳过 Tab 遍历")
-            return False
-
-        try:
-            tabs = list(tab_bar.children())
-        except Exception:
+        tabs = self._find_tabs()
+        if not tabs:
+            print("[INFO] 未找到底部 Tab，跳过 Tab 遍历")
             return False
 
         tab_count = len(tabs)
         print(f"[INFO] 发现 {tab_count} 个 Tab")
 
         for i in range(tab_count):
-            self._lost = False  # 每个 Tab 独立探索，重置迷路状态
+            self._lost = False
             try:
-                # 每次重新获取Tab栏（因为页面可能已变，之前的引用可能失效）
-                current_tab_bar = self._find_tab_bar()
-                if not current_tab_bar:
-                    # Tab栏丢失（可能页面跳转了），重启回首页重试
+                # 每次重新查找Tab（引用可能因页面变化而失效）
+                current_tabs = self._find_tabs()
+                if not current_tabs or i >= len(current_tabs):
                     self._restart_app()
                     time.sleep(1)
-                    current_tab_bar = self._find_tab_bar()
-                    if not current_tab_bar:
+                    current_tabs = self._find_tabs()
+                    if not current_tabs or i >= len(current_tabs):
                         print(f"[WARN] Tab栏丢失，跳过剩余Tab")
                         break
 
-                current_tabs = list(current_tab_bar.children())
-                if i >= len(current_tabs):
-                    break
+                tab = current_tabs[i]
+                # 跳过"+"号发布按钮（通常在中间位置、文本为+或无文本的特殊按钮）
+                if self._is_publish_button(tab):
+                    print(f"[INFO] Tab {i+1} 是发布按钮，跳过")
+                    continue
 
                 print(f"[INFO] 切换到 Tab {i+1}/{tab_count}")
-                current_tabs[i].click()
+                tab.click()
                 time.sleep(PAGE_LOAD_WAIT)
                 popup_handler.dismiss_popups(self.poco, max_attempts=2)
+
+                # 检查是否跳到了需要跳过的页面
+                activity = metadata.get_current_activity(self.serial)
+                if activity and any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
+                    print(f"  [SKIP] 功能页，返回: {activity}")
+                    self._go_back()
+                    time.sleep(BACK_WAIT)
+                    continue
+
                 self._dfs(depth=1)
             except Exception as e:
                 print(f"[WARN] Tab {i} 遍历异常: {e}")
-                # 尝试重启恢复，以便下一个Tab能正常开始
                 self._restart_app()
                 continue
         return True
 
-    def _find_tab_bar(self):
-        """查找底部 Tab 栏"""
+    def _is_publish_button(self, node) -> bool:
+        """判断是否为发布/拍摄按钮（底部中间的+号）"""
+        try:
+            text = node.attr("text") or ""
+            desc = node.attr("desc") or ""
+            name = node.attr("name") or ""
+            content = text + desc + name
+            publish_keywords = ["+", "发布", "拍摄", "publish", "create", "CenterPlus", "centerplus", "投稿"]
+            return any(kw in content for kw in publish_keywords)
+        except Exception:
+            return False
+
+    def _find_tabs(self) -> list:
+        """
+        查找底部 Tab 栏节点列表。
+        策略：
+          1. 先按 resource-id 模式匹配Tab栏容器，取其children
+          2. 如匹配不到，回退到通用方案：屏幕底部水平排列的可点击节点组
+        返回节点列表，或空列表。
+        """
+        # 方式1: resource-id 模式匹配
         tab_patterns = [
             "main_tab", "tab_bar", "bottom_nav", "navigation_bar",
             "BottomNavigationView", "RadioGroup",
@@ -143,31 +194,23 @@ class TraversalEngine:
             try:
                 node = self.poco(nameMatches=f".*{pattern}.*")
                 if node.exists():
-                    return node
+                    children = list(node.children())
+                    if len(children) >= 3:
+                        return children
             except Exception:
                 continue
 
-        # 通用方案：找屏幕底部区域的水平排列可点击节点组
-        try:
-            bottom_tabs = self._find_bottom_clickable_group()
-            if bottom_tabs:
-                return bottom_tabs
-        except Exception:
-            pass
+        # 方式2: 通用——找屏幕底部水平排列的可点击节点
+        return self._find_bottom_clickable_nodes()
 
-        return None
-
-    def _find_bottom_clickable_group(self):
-        """
-        通用底部Tab发现：找到屏幕底部20%区域内，水平排列的可点击节点组。
-        返回一个伪容器对象（包含 children() 方法），或 None。
-        """
+    def _find_bottom_clickable_nodes(self) -> list:
+        """通用底部Tab发现：屏幕底部区域内水平排列的可点击节点"""
         try:
             all_touchable = self.poco(touchable=True)
         except Exception:
-            return None
+            return []
 
-        # 收集底部区域的可点击节点（y > 0.85 即屏幕底部15%）
+        # 收集底部区域的可点击节点（y > 0.88 即屏幕底部12%）
         bottom_nodes = []
         for node in all_touchable:
             try:
@@ -175,29 +218,17 @@ class TraversalEngine:
                 if not pos:
                     continue
                 x, y = pos
-                if y > 0.85:
+                if y > 0.88:
                     bottom_nodes.append((x, node))
             except Exception:
                 continue
 
-        # 底部至少3个横向排列的节点才算是Tab栏
         if len(bottom_nodes) < 3:
-            return None
+            return []
 
         # 按x坐标排序
         bottom_nodes.sort(key=lambda t: t[0])
-
-        # 检查是否大致均匀分布（横向间距相近）
-        xs = [t[0] for t in bottom_nodes]
-        if len(xs) >= 3:
-            gaps = [xs[i+1] - xs[i] for i in range(len(xs)-1)]
-            avg_gap = sum(gaps) / len(gaps)
-            # 间距波动不超过平均值50%，认为是均匀排列
-            if avg_gap > 0.05 and all(abs(g - avg_gap) < avg_gap * 0.5 for g in gaps):
-                nodes_only = [t[1] for t in bottom_nodes]
-                return _FakeContainer(nodes_only)
-
-        return None
+        return [t[1] for t in bottom_nodes]
 
     # ------------------------------------------------------------------
     # DFS 核心
@@ -621,14 +652,3 @@ class TraversalEngine:
             return "unknown_parent"
 
 
-class _FakeContainer:
-    """伪容器，用于包装一组底部Tab节点，提供 children() 接口"""
-
-    def __init__(self, nodes: list):
-        self._nodes = nodes
-
-    def children(self):
-        return self._nodes
-
-    def exists(self):
-        return len(self._nodes) > 0
