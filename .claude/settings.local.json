@@ -5,7 +5,8 @@
       "Bash(powershell -NoProfile -Command ' *)",
       "Bash(powershell -NoProfile -Command \"\\([Environment]::GetEnvironmentVariable\\('Path','User'\\) -split ';'\\) | Select-String 'platform-tools'\")",
       "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\); from core.device import ADB; print\\('ADB路径:', ADB\\)\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\); import main; print\\('main import ok'\\)\")"
     ]
   }
 }
