@@ -1,17 +1,12 @@
 """BFS 遍历引擎——广度优先
 
 流程:
-  1. 依次切换每个 Tab，在每个 Tab 页面上做广度探索
+  1. 依次点击每个 Tab，在每个 Tab 页面上做广度探索
   2. 广度探索: 收集当前页面所有可点击节点，逐个点击
-     - 跳转到新Activity → 截图 → 立即返回（不深入）
+     - 跳转到新Activity → 截图 → 立即返回
      - 没跳转 → 继续下一个
-  3. 当前页面节点全部点完后，切到下一个 Tab 重复
-  4. 所有 Tab 的第一层点完后，再对发现的"有价值的子页面"做第二轮探索
-
-优势:
-  - 先把所有 Tab × 所有浅层页面覆盖一遍（广度）
-  - 不会一头扎进某个列表无限深入（之前的问题）
-  - 同一个Activity只进1次，节省大量时间
+  3. 所有 Tab 的第一层点完后，对发现的有价值子页面做第二轮
+  4. 同一Activity只进1次，已访问过的直接跳过不点击
 """
 
 import subprocess
@@ -35,9 +30,6 @@ from config import (
     BACK_WAIT,
 )
 
-# 同一个Activity只进入1次（1次就够拿到UI模板）
-MAX_VISITS_PER_ACTIVITY = 1
-
 LIST_CONTAINERS = {"RecyclerView", "ListView", "GridView", "ViewPager2"}
 TAB_ID_KEYWORDS = ("tab", "bottom_nav", "navigation")
 
@@ -52,11 +44,8 @@ class TraversalEngine:
         self.app_info = app_info
 
         self.visited_fingerprints = set()
-        self.visited_activities = set()    # 已进入过的Activity集合
+        self.visited_activities = set()
         self.screenshots_taken = 0
-
-        # 第二轮要深入探索的页面列表: [(tab_index, action_id), ...]
-        self.pending_deep_explore = []
 
         self.screen_w, self.screen_h = self._parse_resolution(device_info.get("screen_resolution", ""))
 
@@ -69,7 +58,7 @@ class TraversalEngine:
             return 1080, 2400
 
     def run(self) -> int:
-        """执行 BFS 遍历，返回截图数量。"""
+        """执行 BFS 遍历"""
         print("[INFO] 开始 BFS 遍历...")
 
         dismissed = popup_handler.dismiss_popups(self.poco)
@@ -78,81 +67,110 @@ class TraversalEngine:
 
         self._ensure_on_main_page()
 
-        # === 第一轮: 遍历所有Tab的第一层节点 ===
-        tabs_indices = self._get_valid_tab_indices()
-        if tabs_indices:
-            print(f"[INFO] 发现 {len(tabs_indices)} 个有效 Tab")
-            for tab_idx in tabs_indices:
+        # 找出所有有效Tab数量
+        tab_count = self._count_valid_tabs()
+
+        if tab_count > 0:
+            print(f"[INFO] 发现 {tab_count} 个有效 Tab\n")
+            # === 第一轮: 每个Tab做广度探索 ===
+            for i in range(tab_count):
                 if self.screenshots_taken >= MAX_SCREENSHOTS:
                     break
-                self._explore_tab(tab_idx, depth=0)
+                self._explore_tab_by_order(i)
+
+            # === 第二轮: 对第一轮发现的有价值子页面，每个进入后再广度一层 ===
+            # （已在 _explore_page 中通过递归 depth 实现）
         else:
-            # 没有Tab，直接探索当前页
-            print("[INFO] 未找到 Tab，直接探索当前页")
+            print("[INFO] 未找到 Tab，直接探索当前页\n")
             self._ensure_on_main_page()
             self._explore_page(depth=0)
-
-        # === 第二轮: 深入探索第一轮发现的子页面 ===
-        if self.pending_deep_explore and self.screenshots_taken < MAX_SCREENSHOTS:
-            print(f"\n[INFO] === 第二轮: 深入探索 {len(self.pending_deep_explore)} 个子页面 ===")
-            for task in self.pending_deep_explore:
-                if self.screenshots_taken >= MAX_SCREENSHOTS:
-                    break
-                tab_idx = task["tab_index"]
-                action_id = task["action_id"]
-                depth = task["depth"]
-
-                # 导航: 回到首页 → 切Tab → 点击对应节点进入子页面
-                if self._navigate_and_click(tab_idx, action_id):
-                    self._explore_page(depth)
-                    self._ensure_on_main_page()
 
         print(f"\n[DONE] BFS 遍历完成，共截图 {self.screenshots_taken} 张")
         return self.screenshots_taken
 
     # ------------------------------------------------------------------
-    # 第一轮: Tab级广度探索
+    # Tab 遍历——直接按顺序点击，不依赖索引映射
     # ------------------------------------------------------------------
 
-    def _explore_tab(self, tab_index: int, depth: int):
-        """切到指定Tab，探索该Tab页面的所有第一层节点"""
-        print(f"\n[INFO] === Tab {tab_index} 探索开始 ===")
+    def _count_valid_tabs(self) -> int:
+        """计算有效Tab数量（排除发布按钮和个人页）"""
+        tabs = self._find_tabs()
+        if not tabs:
+            return 0
+        count = 0
+        for tab in tabs:
+            if not self._is_publish_button(tab):
+                count += 1
+        return count
 
-        # 确保在首页
+    def _explore_tab_by_order(self, order: int):
+        """
+        按顺序点击第 order 个有效Tab（跳过发布按钮）。
+        每次从首页重新查找Tab列表，避免引用失效。
+        """
         self._ensure_on_main_page()
+        time.sleep(0.5)
 
-        # 切到目标Tab
-        if not self._switch_tab(tab_index):
-            print(f"[WARN] Tab {tab_index} 切换失败，跳过")
+        tabs = self._find_tabs()
+        if not tabs:
+            print(f"[WARN] 找不到Tab栏，跳过")
             return
 
-        time.sleep(PAGE_LOAD_WAIT)
-        popup_handler.dismiss_popups(self.poco, max_attempts=2)
+        # 找到第 order 个非发布按钮的Tab
+        valid_idx = -1
+        for i, tab in enumerate(tabs):
+            if self._is_publish_button(tab):
+                continue
+            valid_idx += 1
+            if valid_idx == order:
+                # 点击这个Tab
+                print(f"[INFO] === 有效Tab {order} (原始位置{i}) 探索开始 ===")
+                try:
+                    tab.click()
+                except Exception:
+                    print(f"[WARN] Tab点击失败，跳过")
+                    return
 
-        # 检查是否为需要跳过的页面
-        activity = metadata.get_current_activity(self.serial)
-        if not activity or PACKAGE_NAME not in activity:
-            return
-        if any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
-            return
-        if SKIP_PERSONAL_PAGES:
-            hierarchy = self._dump_hierarchy()
-            if hierarchy and privacy.is_personal_page(hierarchy, activity):
-                print(f"  [SKIP] 个人页 Tab: {activity.split('/')[-1]}")
+                time.sleep(PAGE_LOAD_WAIT)
+                popup_handler.dismiss_popups(self.poco, max_attempts=2)
+
+                # 检查是否为功能页或个人页
+                activity = metadata.get_current_activity(self.serial)
+                if not activity or PACKAGE_NAME not in activity:
+                    return
+                if any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
+                    print(f"  [SKIP] 功能页: {activity.split('/')[-1]}")
+                    return
+                if SKIP_PERSONAL_PAGES:
+                    hierarchy = self._dump_hierarchy()
+                    if hierarchy and privacy.is_personal_page(hierarchy, activity):
+                        print(f"  [SKIP] 个人页: {activity.split('/')[-1]}")
+                        return
+
+                # 探索这个Tab页面
+                self._explore_page(depth=0)
                 return
 
-        # 探索当前Tab页面
-        self._explore_page(depth, tab_index=tab_index)
+    # ------------------------------------------------------------------
+    # 广度探索核心
+    # ------------------------------------------------------------------
 
-    def _explore_page(self, depth: int, tab_index: int = -1):
+    def _explore_page(self, depth: int):
         """
         广度探索当前页面:
         1. 截图当前页
         2. 收集所有可点击节点
-        3. 逐个点击: 跳转了 → 截图新页面 → 立即返回; 没跳转 → 下一个
+        3. 逐个点击: 新Activity → 截图 → 如果depth允许则继续探索一层 → 返回
         """
+        if depth > MAX_DEPTH:
+            return
+        if self.screenshots_taken >= MAX_SCREENSHOTS:
+            return
+
         current_activity = metadata.get_current_activity(self.serial)
         if not current_activity or PACKAGE_NAME not in current_activity:
+            return
+        if any(kw in current_activity for kw in SKIP_ACTIVITY_KEYWORDS):
             return
 
         # 截图当前页
@@ -166,187 +184,98 @@ class TraversalEngine:
         if not actions:
             return
 
-        print(f"  [BFS] depth={depth} {current_activity.split('/')[-1]} 节点数={len(actions)}")
+        print(f"  [BFS] depth={depth} {current_activity.split('/')[-1]} 节点={len(actions)}")
 
-        skipped = 0
+        discovered_pages = []  # 本页发现的新Activity，第二遍再深入
+
         for idx, action in enumerate(actions):
             if self.screenshots_taken >= MAX_SCREENSHOTS:
-                return
+                break
 
             # 确认还在当前页
             now = metadata.get_current_activity(self.serial)
             if now != current_activity:
                 if not self._go_back_to_activity(current_activity):
-                    print(f"  [BFS] 无法回到 {current_activity.split('/')[-1]}，结束本页")
                     return
 
-            # 点击
+            # 点击前检查：如果这个节点的文字/id暗示会跳到已知Activity，跳过
+            # （无法预判，只能点击后判断）
+
             if not self._click(action):
                 continue
 
             time.sleep(PAGE_LOAD_WAIT)
             popup_handler.dismiss_popups(self.poco, max_attempts=2)
 
-            # 判断是否跳转
             new_activity = metadata.get_current_activity(self.serial)
             if not new_activity or PACKAGE_NAME not in new_activity:
-                # 跳出App，回来
                 self._ensure_on_main_page()
                 if not self._go_back_to_activity(current_activity):
                     return
                 continue
 
             if new_activity == current_activity:
-                # 没跳转
                 continue
 
-            # 跳过功能页
             if any(kw in new_activity for kw in SKIP_ACTIVITY_KEYWORDS):
                 self._go_back_to_activity(current_activity)
                 continue
 
-            # 已经访问过该Activity → 直接返回（不截图、不浪费时间）
+            # 已访问过 → 直接返回
             if new_activity in self.visited_activities:
-                skipped += 1
                 self._go_back_to_activity(current_activity)
                 continue
 
-            # 新Activity！标记已访问
+            # 新Activity！
             self.visited_activities.add(new_activity)
-
-            # 截图
             print(f"  [BFS] 节点{idx} -> {new_activity.split('/')[-1]}")
+
+            # 截图新页面
             took = self._try_screenshot(new_activity, depth + 1)
+            if took:
+                discovered_pages.append(action)
 
-            # 记录到第二轮深入列表（如果深度允许）
-            if took and depth + 1 < MAX_DEPTH:
-                self.pending_deep_explore.append({
-                    "tab_index": tab_index,
-                    "action_id": action["id"],
-                    "depth": depth + 1,
-                })
-
-            # 立即返回当前页，继续下一个节点
+            # 返回当前页
             self._go_back_to_activity(current_activity)
 
-        if skipped > 0:
-            print(f"  [BFS] 跳过 {skipped} 个已访问Activity的节点")
+        # 本页节点全部点完后，对发现的有价值子页面做第二层探索
+        if discovered_pages and depth + 1 <= MAX_DEPTH and self.screenshots_taken < MAX_SCREENSHOTS:
+            for action in discovered_pages:
+                if self.screenshots_taken >= MAX_SCREENSHOTS:
+                    break
 
-    # ------------------------------------------------------------------
-    # 第二轮: 深入探索
-    # ------------------------------------------------------------------
+                # 确认在当前页
+                now = metadata.get_current_activity(self.serial)
+                if now != current_activity:
+                    if not self._go_back_to_activity(current_activity):
+                        break
 
-    def _navigate_and_click(self, tab_index: int, action_id: str) -> bool:
-        """导航到首页 → 切Tab → 找到并点击指定节点"""
-        self._ensure_on_main_page()
-
-        if tab_index >= 0:
-            if not self._switch_tab(tab_index):
-                return False
-            time.sleep(PAGE_LOAD_WAIT)
-
-        # 在当前页面找到对应action并点击
-        actions = self._get_actions()
-        for action in actions:
-            if action["id"] == action_id:
+                # 重新点击进入子页面
                 if not self._click(action):
-                    return False
+                    continue
                 time.sleep(PAGE_LOAD_WAIT)
                 popup_handler.dismiss_popups(self.poco, max_attempts=2)
-                # 确认跳转了
-                activity = metadata.get_current_activity(self.serial)
-                if activity and PACKAGE_NAME in activity:
-                    return True
-                return False
 
-        return False
-
-    # ------------------------------------------------------------------
-    # Tab 操作
-    # ------------------------------------------------------------------
-
-    def _get_valid_tab_indices(self) -> list:
-        """返回有效（非发布按钮）的Tab索引列表"""
-        tabs = self._find_tabs()
-        if not tabs:
-            return []
-        valid = []
-        for i, tab in enumerate(tabs):
-            if not self._is_publish_button(tab):
-                valid.append(i)
-        return valid
-
-    def _switch_tab(self, tab_index: int) -> bool:
-        """切换到指定Tab"""
-        tabs = self._find_tabs()
-        if not tabs or tab_index >= len(tabs):
-            return False
-        try:
-            tabs[tab_index].click()
-            return True
-        except Exception:
-            return False
-
-    def _find_tabs(self) -> list:
-        """查找底部 Tab 节点列表"""
-        tab_patterns = [
-            "main_tab", "tab_bar", "bottom_nav", "navigation_bar",
-            "BottomNavigationView", "RadioGroup",
-        ]
-        for pattern in tab_patterns:
-            try:
-                node = self.poco(nameMatches=f".*{pattern}.*")
-                if node.exists():
-                    children = list(node.children())
-                    if len(children) >= 3:
-                        return children
-            except Exception:
-                continue
-        return self._find_bottom_clickable_nodes()
-
-    def _find_bottom_clickable_nodes(self) -> list:
-        """通用底部Tab发现"""
-        try:
-            all_touchable = self.poco(touchable=True)
-        except Exception:
-            return []
-
-        bottom_nodes = []
-        for node in all_touchable:
-            try:
-                pos = node.attr("pos")
-                if not pos:
+                child_activity = metadata.get_current_activity(self.serial)
+                if not child_activity or child_activity == current_activity:
                     continue
-                x, y = pos
-                if y > 0.88:
-                    bottom_nodes.append((x, node))
-            except Exception:
-                continue
+                if PACKAGE_NAME not in child_activity:
+                    self._ensure_on_main_page()
+                    self._go_back_to_activity(current_activity)
+                    continue
 
-        if len(bottom_nodes) < 3:
-            return []
+                # 在子页面做广度探索
+                self._explore_page(depth + 1)
 
-        bottom_nodes.sort(key=lambda t: t[0])
-        return [t[1] for t in bottom_nodes]
-
-    def _is_publish_button(self, node) -> bool:
-        try:
-            text = node.attr("text") or ""
-            desc = node.attr("desc") or ""
-            name = node.attr("name") or ""
-            content = text + desc + name
-            keywords = ["+", "发布", "拍摄", "publish", "create",
-                        "CenterPlus", "centerplus", "投稿"]
-            return any(kw in content for kw in keywords)
-        except Exception:
-            return False
+                # 返回
+                self._go_back_to_activity(current_activity)
 
     # ------------------------------------------------------------------
     # 截图
     # ------------------------------------------------------------------
 
     def _try_screenshot(self, activity: str, depth: int) -> bool:
-        """截图当前页面，用布局指纹去重。"""
+        """截图当前页面，布局指纹去重。"""
         hierarchy = self._dump_hierarchy()
         if not hierarchy:
             return False
@@ -411,7 +340,7 @@ class TraversalEngine:
     # ------------------------------------------------------------------
 
     def _go_back_to_activity(self, target_activity: str) -> bool:
-        """按返回键回到目标 Activity"""
+        """按返回键回到目标Activity"""
         for _ in range(5):
             now = metadata.get_current_activity(self.serial)
             if now == target_activity:
@@ -423,8 +352,7 @@ class TraversalEngine:
             time.sleep(BACK_WAIT)
             popup_handler.dismiss_popups(self.poco, max_attempts=1)
 
-        now = metadata.get_current_activity(self.serial)
-        return now == target_activity
+        return metadata.get_current_activity(self.serial) == target_activity
 
     def _ensure_on_main_page(self):
         """确保在App主页面"""
@@ -441,6 +369,64 @@ class TraversalEngine:
                     if not any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
                         return
             self._restart_app()
+
+    # ------------------------------------------------------------------
+    # Tab
+    # ------------------------------------------------------------------
+
+    def _find_tabs(self) -> list:
+        """查找底部Tab节点列表"""
+        tab_patterns = [
+            "main_tab", "tab_bar", "bottom_nav", "navigation_bar",
+            "BottomNavigationView", "RadioGroup",
+        ]
+        for pattern in tab_patterns:
+            try:
+                node = self.poco(nameMatches=f".*{pattern}.*")
+                if node.exists():
+                    children = list(node.children())
+                    if len(children) >= 3:
+                        return children
+            except Exception:
+                continue
+        return self._find_bottom_clickable_nodes()
+
+    def _find_bottom_clickable_nodes(self) -> list:
+        """通用底部Tab发现"""
+        try:
+            all_touchable = self.poco(touchable=True)
+        except Exception:
+            return []
+
+        bottom_nodes = []
+        for node in all_touchable:
+            try:
+                pos = node.attr("pos")
+                if not pos:
+                    continue
+                x, y = pos
+                if y > 0.88:
+                    bottom_nodes.append((x, node))
+            except Exception:
+                continue
+
+        if len(bottom_nodes) < 3:
+            return []
+
+        bottom_nodes.sort(key=lambda t: t[0])
+        return [t[1] for t in bottom_nodes]
+
+    def _is_publish_button(self, node) -> bool:
+        try:
+            text = node.attr("text") or ""
+            desc = node.attr("desc") or ""
+            name = node.attr("name") or ""
+            content = text + desc + name
+            keywords = ["+", "发布", "拍摄", "publish", "create",
+                        "CenterPlus", "centerplus", "投稿"]
+            return any(kw in content for kw in keywords)
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # 控件
