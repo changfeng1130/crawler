@@ -99,32 +99,33 @@ class TraversalEngine:
         """执行 BFS 遍历"""
         print("[INFO] 开始 BFS 遍历...")
 
-        dismissed = popup_handler.dismiss_popups(self.poco)
-        if dismissed:
-            print(f"[INFO] 关闭了 {dismissed} 个弹窗")
+        try:
+            dismissed = popup_handler.dismiss_popups(self.poco)
+            if dismissed:
+                print(f"[INFO] 关闭了 {dismissed} 个弹窗")
 
-        self._ensure_on_main_page()
-
-        # 找出所有有效Tab数量
-        tab_count = self._count_valid_tabs()
-
-        if tab_count > 0:
-            print(f"[INFO] 发现 {tab_count} 个有效 Tab\n")
-            for i in range(tab_count):
-                if self.screenshots_taken >= MAX_SCREENSHOTS:
-                    break
-                # 跳过已完成的Tab
-                if i in self.completed_tabs:
-                    print(f"[INFO] Tab {i} 已完成，跳过")
-                    continue
-                self._explore_tab_by_order(i)
-                # 每完成一个Tab保存状态
-                self.completed_tabs.add(i)
-                self._save_state()
-        else:
-            print("[INFO] 未找到 Tab，直接探索当前页\n")
             self._ensure_on_main_page()
-            self._explore_page(depth=0)
+
+            tab_count = self._count_valid_tabs()
+
+            if tab_count > 0:
+                print(f"[INFO] 发现 {tab_count} 个有效 Tab\n")
+                for i in range(tab_count):
+                    if self.screenshots_taken >= MAX_SCREENSHOTS:
+                        break
+                    if i in self.completed_tabs:
+                        print(f"[INFO] Tab {i} 已完成，跳过")
+                        continue
+                    self._explore_tab_by_order(i)
+                    self.completed_tabs.add(i)
+                    self._save_state()
+            else:
+                print("[INFO] 未找到 Tab，直接探索当前页\n")
+                self._ensure_on_main_page()
+                self._explore_page(depth=0)
+        except KeyboardInterrupt:
+            print("\n[INFO] 用户中断，保存状态...")
+        finally:
             self._save_state()
 
         print(f"\n[DONE] BFS 遍历完成，共截图 {self.screenshots_taken} 张")
