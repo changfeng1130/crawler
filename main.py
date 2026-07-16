@@ -48,7 +48,7 @@ def launch_bilibili(serial: str):
 
 
 def main():
-    resume = "--resume" in sys.argv
+    resume = "--resume" in sys.argv or "-resume" in sys.argv
 
     print("=" * 50)
     if resume:

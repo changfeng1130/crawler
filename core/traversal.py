@@ -285,7 +285,7 @@ class TraversalEngine:
                 continue
 
             # 跳回首页Activity → 不处理（防止深入探索时无限循环）
-            if new_activity == self._main_activity():
+            if self._is_main_activity(new_activity):
                 skipped += 1
                 self._go_back()
                 time.sleep(BACK_WAIT)
@@ -358,8 +358,14 @@ class TraversalEngine:
     # 截图
     # ------------------------------------------------------------------
 
+    def _is_main_activity(self, activity: str) -> bool:
+        """判断是否为App首页Activity"""
+        if not activity:
+            return False
+        return "MainActivityV2" in activity and PACKAGE_NAME in activity
+
     def _main_activity(self) -> str:
-        """返回App的主Activity全名"""
+        """返回App的主Activity全名（用于精确比较）"""
         return f"{PACKAGE_NAME}/.MainActivityV2"
 
     def _try_screenshot(self, activity: str, depth: int) -> bool:
@@ -446,22 +452,25 @@ class TraversalEngine:
         return metadata.get_current_activity(self.serial) == target_activity
 
     def _ensure_on_main_page(self):
-        """确保在App主页面"""
+        """确保在App首页（MainActivityV2），不是随便一个App内页面"""
         activity = metadata.get_current_activity(self.serial)
-        if not activity or PACKAGE_NAME not in activity:
-            self._restart_app()
-            time.sleep(1)
+        if self._is_main_activity(activity):
             return
-        if any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
-            for _ in range(3):
+
+        # 不在首页：尝试按返回键回去（最多5次）
+        if activity and PACKAGE_NAME in activity:
+            for _ in range(5):
                 self._go_back()
                 time.sleep(BACK_WAIT)
                 activity = metadata.get_current_activity(self.serial)
-                if activity and PACKAGE_NAME in activity:
-                    if not any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
-                        return
-            self._restart_app()
-            time.sleep(1)
+                if self._is_main_activity(activity):
+                    return
+                if not activity or PACKAGE_NAME not in activity:
+                    break
+
+        # 返回键搞不定，直接重启
+        self._restart_app()
+        time.sleep(1)
 
     # ------------------------------------------------------------------
     # Tab
