@@ -48,8 +48,7 @@ class TraversalEngine:
         self.device_info = device_info
         self.app_info = app_info
 
-        self.visited_fingerprints = set()
-        self.visited_coarse_fps = {}
+        self.visited_fingerprints = set()     # 布局指纹（前2层结构）
         self.visited_actions = set()
         self.activity_visit_count = {}     # Activity -> 进入次数
         self.screenshots_taken = 0
@@ -310,7 +309,7 @@ class TraversalEngine:
 
     def _try_screenshot(self, activity: str, depth: int) -> bool:
         """
-        尝试截图当前页面。用指纹判断是否已截过。
+        尝试截图当前页面。用布局指纹判断是否已截过同模板。
         返回 True = 新页面已截图，False = 已知页面跳过。
         """
         hierarchy = self._dump_hierarchy()
@@ -322,25 +321,15 @@ class TraversalEngine:
             print(f"  [SKIP] 个人页: {activity.split('/')[-1]} (depth={depth})")
             return False
 
+        # 布局指纹（前2层TypeName+数量，对内容变化不敏感）
         fp = fingerprint.generate(hierarchy, activity)
 
-        # 精确指纹已访问
         if fp in self.visited_fingerprints:
             self.consecutive_known += 1
             return False
 
-        # 粗粒度检查（同模板已截太多次）
-        coarse_fp = fingerprint.generate_coarse(hierarchy, activity)
-        coarse_count = self.visited_coarse_fps.get(coarse_fp, 0)
-        if coarse_count >= MAX_SAME_ACTIVITY_SCREENSHOTS:
-            self.visited_fingerprints.add(fp)
-            self.consecutive_known += 1
-            print(f"  [SKIP] 同模板已截{coarse_count}次: {activity.split('/')[-1]} (depth={depth})")
-            return False
-
-        # 新页面，截图
+        # 新模板，截图
         self.visited_fingerprints.add(fp)
-        self.visited_coarse_fps[coarse_fp] = coarse_count + 1
         self.consecutive_known = 0
 
         popup_handler.dismiss_popups(self.poco, max_attempts=2)
