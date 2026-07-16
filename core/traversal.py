@@ -187,46 +187,49 @@ class TraversalEngine:
         print(f"  [BFS] depth={depth} {current_activity.split('/')[-1]} 节点={len(actions)}")
 
         discovered_pages = []  # 本页发现的新Activity，第二遍再深入
+        skipped = 0
 
         for idx, action in enumerate(actions):
             if self.screenshots_taken >= MAX_SCREENSHOTS:
                 break
 
-            # 确认还在当前页
-            now = metadata.get_current_activity(self.serial)
-            if now != current_activity:
-                if not self._go_back_to_activity(current_activity):
-                    return
-
-            # 点击前检查：如果这个节点的文字/id暗示会跳到已知Activity，跳过
-            # （无法预判，只能点击后判断）
-
             if not self._click(action):
                 continue
 
-            time.sleep(PAGE_LOAD_WAIT)
-            popup_handler.dismiss_popups(self.poco, max_attempts=2)
-
+            # 快速检查是否跳转（短等待）
+            time.sleep(0.4)
             new_activity = metadata.get_current_activity(self.serial)
-            if not new_activity or PACKAGE_NAME not in new_activity:
-                self._ensure_on_main_page()
+
+            # 没跳转 → 继续下一个（最快路径，不做任何额外操作）
+            if not new_activity or new_activity == current_activity:
+                continue
+
+            # 跳出App → 快速回来
+            if PACKAGE_NAME not in new_activity:
+                self._go_back()
+                time.sleep(BACK_WAIT)
                 if not self._go_back_to_activity(current_activity):
+                    self._ensure_on_main_page()
                     return
                 continue
 
-            if new_activity == current_activity:
+            # 跳到功能页或已知Activity → 快速返回（一次返回键就够）
+            if any(kw in new_activity for kw in SKIP_ACTIVITY_KEYWORDS) or \
+               new_activity in self.visited_activities:
+                skipped += 1
+                self._go_back()
+                time.sleep(BACK_WAIT)
+                # 确认回来了
+                if metadata.get_current_activity(self.serial) != current_activity:
+                    if not self._go_back_to_activity(current_activity):
+                        return
                 continue
 
-            if any(kw in new_activity for kw in SKIP_ACTIVITY_KEYWORDS):
-                self._go_back_to_activity(current_activity)
-                continue
+            # === 新Activity！值得处理 ===
+            # 等待页面完全加载（只有新页面才等完整时间）
+            time.sleep(PAGE_LOAD_WAIT - 0.4)
+            popup_handler.dismiss_popups(self.poco, max_attempts=2)
 
-            # 已访问过 → 直接返回
-            if new_activity in self.visited_activities:
-                self._go_back_to_activity(current_activity)
-                continue
-
-            # 新Activity！
             self.visited_activities.add(new_activity)
             print(f"  [BFS] 节点{idx} -> {new_activity.split('/')[-1]}")
 
@@ -237,6 +240,9 @@ class TraversalEngine:
 
             # 返回当前页
             self._go_back_to_activity(current_activity)
+
+        if skipped > 0:
+            print(f"  [BFS] 快速跳过 {skipped} 个已知节点")
 
         # 本页节点全部点完后，对发现的有价值子页面做第二层探索
         if discovered_pages and depth + 1 <= MAX_DEPTH and self.screenshots_taken < MAX_SCREENSHOTS:
