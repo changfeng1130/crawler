@@ -32,6 +32,16 @@ def generate(hierarchy: dict, activity: str) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+def generate_coarse(hierarchy: dict, activity: str) -> str:
+    """
+    生成粗粒度指纹（只看Activity + 前两层结构）。
+    用于判断"同一个页面模板的不同实例"（如搜索页搜了不同关键词）。
+    """
+    skeleton = _extract_shallow_skeleton(hierarchy, max_depth=2)
+    raw = f"{activity}|{skeleton}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
 def _meaningful(id_suffix: str) -> bool:
     """id 后缀是否有意义（含字母）。纯数字/下划线的动态 id 视为无意义。"""
     return any(c.isalpha() for c in id_suffix)
@@ -73,3 +83,36 @@ def _extract_skeleton(node: dict, depth: int, in_list: bool) -> str:
 
     node_sig = f"{depth}:{node_type}:{id_suffix}:{len(child_sigs)}"
     return f"[{node_sig}{''.join(child_sigs)}]"
+
+
+def _extract_shallow_skeleton(node: dict, max_depth: int, current_depth: int = 0) -> str:
+    """浅层骨架提取——只看前 max_depth 层结构，用于粗粒度去重"""
+    if current_depth > max_depth:
+        return ""
+
+    payload = node.get("payload", {})
+    if not payload.get("visible", True):
+        return ""
+
+    node_type = payload.get("type", "Unknown")
+    resource_id = payload.get("name", "") or ""
+    id_suffix = resource_id.split("/")[-1] if resource_id else ""
+
+    if id_suffix and not _meaningful(id_suffix):
+        id_suffix = ""
+
+    children = node.get("children", [])
+    child_types = []
+    for child in children:
+        cp = child.get("payload", {})
+        if cp.get("visible", True):
+            child_types.append(cp.get("type", ""))
+
+    child_sigs = []
+    if current_depth < max_depth:
+        for child in children:
+            sig = _extract_shallow_skeleton(child, max_depth, current_depth + 1)
+            if sig:
+                child_sigs.append(sig)
+
+    return f"[{node_type}:{id_suffix}:{len(child_types)}{''.join(child_sigs)}]"

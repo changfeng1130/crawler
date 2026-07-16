@@ -30,6 +30,9 @@ from config import (
     BACK_WAIT,
 )
 
+# 同一Activity最多截图次数（防止同一页面因内容变化反复截图）
+MAX_SAME_ACTIVITY_SCREENSHOTS = 3
+
 
 LIST_CONTAINERS = {"RecyclerView", "ListView", "GridView", "ViewPager2"}
 
@@ -46,7 +49,8 @@ class TraversalEngine:
         self.device_info = device_info
         self.app_info = app_info
 
-        self.visited_fingerprints = set()
+        self.visited_fingerprints = set()      # 精确指纹（完整骨架）
+        self.visited_coarse_fps = {}           # 粗粒度指纹 -> 已截图次数（同模板限次）
         self.visited_actions = set()
         self.screenshots_taken = 0
         self.consecutive_known = 0
@@ -95,17 +99,36 @@ class TraversalEngine:
         except Exception:
             return False
 
-        print(f"[INFO] 发现 {len(tabs)} 个 Tab")
+        tab_count = len(tabs)
+        print(f"[INFO] 发现 {tab_count} 个 Tab")
 
-        for i, tab in enumerate(tabs):
+        for i in range(tab_count):
             self._lost = False  # 每个 Tab 独立探索，重置迷路状态
             try:
-                tab.click()
+                # 每次重新获取Tab栏（因为页面可能已变，之前的引用可能失效）
+                current_tab_bar = self._find_tab_bar()
+                if not current_tab_bar:
+                    # Tab栏丢失（可能页面跳转了），重启回首页重试
+                    self._restart_app()
+                    time.sleep(1)
+                    current_tab_bar = self._find_tab_bar()
+                    if not current_tab_bar:
+                        print(f"[WARN] Tab栏丢失，跳过剩余Tab")
+                        break
+
+                current_tabs = list(current_tab_bar.children())
+                if i >= len(current_tabs):
+                    break
+
+                print(f"[INFO] 切换到 Tab {i+1}/{tab_count}")
+                current_tabs[i].click()
                 time.sleep(PAGE_LOAD_WAIT)
                 popup_handler.dismiss_popups(self.poco, max_attempts=2)
                 self._dfs(depth=1)
             except Exception as e:
                 print(f"[WARN] Tab {i} 遍历异常: {e}")
+                # 尝试重启恢复，以便下一个Tab能正常开始
+                self._restart_app()
                 continue
         return True
 
@@ -122,13 +145,57 @@ class TraversalEngine:
                     return node
             except Exception:
                 continue
-        # B站特殊：尝试找底部区域的可点击元素集合
+
+        # 通用方案：找屏幕底部区域的水平排列可点击节点组
         try:
-            node = self.poco(nameMatches=".*tv.danmaku.bili:id/tab.*")
-            if node.exists():
-                return node.parent()
+            bottom_tabs = self._find_bottom_clickable_group()
+            if bottom_tabs:
+                return bottom_tabs
         except Exception:
             pass
+
+        return None
+
+    def _find_bottom_clickable_group(self):
+        """
+        通用底部Tab发现：找到屏幕底部20%区域内，水平排列的可点击节点组。
+        返回一个伪容器对象（包含 children() 方法），或 None。
+        """
+        try:
+            all_touchable = self.poco(touchable=True)
+        except Exception:
+            return None
+
+        # 收集底部区域的可点击节点（y > 0.85 即屏幕底部15%）
+        bottom_nodes = []
+        for node in all_touchable:
+            try:
+                pos = node.attr("pos")
+                if not pos:
+                    continue
+                x, y = pos
+                if y > 0.85:
+                    bottom_nodes.append((x, node))
+            except Exception:
+                continue
+
+        # 底部至少3个横向排列的节点才算是Tab栏
+        if len(bottom_nodes) < 3:
+            return None
+
+        # 按x坐标排序
+        bottom_nodes.sort(key=lambda t: t[0])
+
+        # 检查是否大致均匀分布（横向间距相近）
+        xs = [t[0] for t in bottom_nodes]
+        if len(xs) >= 3:
+            gaps = [xs[i+1] - xs[i] for i in range(len(xs)-1)]
+            avg_gap = sum(gaps) / len(gaps)
+            # 间距波动不超过平均值50%，认为是均匀排列
+            if avg_gap > 0.05 and all(abs(g - avg_gap) < avg_gap * 0.5 for g in gaps):
+                nodes_only = [t[1] for t in bottom_nodes]
+                return _FakeContainer(nodes_only)
+
         return None
 
     # ------------------------------------------------------------------
@@ -170,6 +237,12 @@ class TraversalEngine:
                 continue
             self.visited_actions.add(action_key)
 
+            # 如果当前不在目标页（之前回退失败），尝试恢复
+            if not self._is_on_page(current_fp):
+                if not self._try_recover_to(current_fp):
+                    print(f"  [DFS] depth={depth} 无法恢复到当前页，放弃剩余动作")
+                    return
+
             # 执行点击
             if not self._click(action):
                 continue
@@ -183,7 +256,6 @@ class TraversalEngine:
                 continue
 
             if new_fp == current_fp:
-                # 非导航型点击（点赞/关注/同一页内切换）—— 不递归、不回退
                 continue
 
             # 进入新页面，递归
@@ -194,10 +266,10 @@ class TraversalEngine:
             if self._lost:
                 return
 
-            # 回退到当前页（只按返回键；退出App才重启）
+            # 回退到当前页
             if not self._return_to_page(current_fp):
-                print(f"  [DFS] depth={depth} 回不到当前页，放弃剩余动作")
-                return
+                # 回退失败但仍在App内 → 不立刻放弃，下一轮循环顶部会尝试恢复
+                continue
 
     # ------------------------------------------------------------------
     # 页面处理
@@ -233,12 +305,23 @@ class TraversalEngine:
             return ("KNOWN", "")  # dump 失败，按已知处理避免误截图
         fp = fingerprint.generate(hierarchy, activity)
 
+        # 精确指纹已访问过 → 跳过
         if fp in self.visited_fingerprints:
             self.consecutive_known += 1
             return ("KNOWN", fp)
 
+        # 粗粒度指纹检查：同一模板（Activity+浅层结构）已截过太多次 → 跳过
+        coarse_fp = fingerprint.generate_coarse(hierarchy, activity)
+        coarse_count = self.visited_coarse_fps.get(coarse_fp, 0)
+        if coarse_count >= MAX_SAME_ACTIVITY_SCREENSHOTS:
+            self.visited_fingerprints.add(fp)
+            self.consecutive_known += 1
+            print(f"  [SKIP] 同模板已截{coarse_count}次，跳过: {activity} (depth={depth})")
+            return ("KNOWN", fp)
+
         # 新页面
         self.visited_fingerprints.add(fp)
+        self.visited_coarse_fps[coarse_fp] = coarse_count + 1
         self.consecutive_known = 0
 
         # 关弹窗
@@ -432,16 +515,15 @@ class TraversalEngine:
 
     def _return_to_page(self, target_fp: str) -> bool:
         """
-        尝试返回目标页：只按返回键 1-2 次。
+        尝试返回目标页：按返回键最多 4 次。
         - 已在目标页 -> True
-        - 退出了 App -> 重启回首页，置 _lost，返回 False（让 DFS 一路向上退出）
-        - 在 App 内但回不到目标页 -> 返回 False（放弃本页剩余动作，向上退出让父页处理）
-        不会因回退失败而连环重启。
+        - 退出了 App -> 重启回首页，置 _lost，返回 False
+        - 在 App 内但回不到目标页 -> 返回 False（放弃本页剩余动作）
         """
         if self._is_on_page(target_fp):
             return True
 
-        for _ in range(2):
+        for _ in range(4):
             self._go_back()
             time.sleep(BACK_WAIT)
             popup_handler.dismiss_popups(self.poco, max_attempts=1)
@@ -454,6 +536,26 @@ class TraversalEngine:
                 return False
 
         return False  # 在 App 内但回不到目标页
+
+    def _try_recover_to(self, target_fp: str) -> bool:
+        """
+        尝试恢复到目标页面。先尝试返回键，失败则重启App。
+        对于非首页的深层页面，重启后无法回到原位，返回 False。
+        对于 depth<=1 的页面（首页/Tab页），重启后可达，返回 True。
+        """
+        # 先尝试返回键
+        for _ in range(3):
+            self._go_back()
+            time.sleep(BACK_WAIT)
+            if self._is_on_page(target_fp):
+                return True
+            if not self._in_app():
+                break
+
+        # 重启App回首页
+        self._restart_app()
+        # 重启后检查是否恰好在目标页（通常只有首页能匹配）
+        return self._is_on_page(target_fp)
 
     def _restart_app(self):
         """重启App"""
@@ -510,3 +612,16 @@ class TraversalEngine:
             return node.parent().attr("name") or "unknown_parent"
         except Exception:
             return "unknown_parent"
+
+
+class _FakeContainer:
+    """伪容器，用于包装一组底部Tab节点，提供 children() 接口"""
+
+    def __init__(self, nodes: list):
+        self._nodes = nodes
+
+    def children(self):
+        return self._nodes
+
+    def exists(self):
+        return len(self._nodes) > 0
