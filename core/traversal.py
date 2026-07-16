@@ -9,8 +9,10 @@
   4. 同一Activity只进1次，已访问过的直接跳过不点击
 """
 
+import json
 import subprocess
 import time
+from datetime import datetime
 
 from core import fingerprint, popup_handler, screenshot, metadata, privacy
 from core.adb_bin import ADB
@@ -28,6 +30,7 @@ from config import (
     SKIP_ACTIVITY_KEYWORDS,
     PAGE_LOAD_WAIT,
     BACK_WAIT,
+    STATE_FILE,
 )
 
 LIST_CONTAINERS = {"RecyclerView", "ListView", "GridView", "ViewPager2"}
@@ -37,7 +40,7 @@ TAB_ID_KEYWORDS = ("tab", "bottom_nav", "navigation")
 class TraversalEngine:
     """BFS 遍历引擎"""
 
-    def __init__(self, poco, serial: str, device_info: dict, app_info: dict):
+    def __init__(self, poco, serial: str, device_info: dict, app_info: dict, resume: bool = False):
         self.poco = poco
         self.serial = serial
         self.device_info = device_info
@@ -45,7 +48,12 @@ class TraversalEngine:
 
         self.visited_fingerprints = set()
         self.visited_activities = set()
+        self.completed_tabs = set()
         self.screenshots_taken = 0
+
+        # 如果是resume模式，从state.json恢复状态
+        if resume:
+            self._load_state()
 
         self.screen_w, self.screen_h = self._parse_resolution(device_info.get("screen_resolution", ""))
 
@@ -56,6 +64,36 @@ class TraversalEngine:
             return int(w), int(h)
         except Exception:
             return 1080, 2400
+
+    def _load_state(self):
+        """从 state.json 恢复遍历状态"""
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            self.visited_fingerprints = set(state.get("visited_fingerprints", []))
+            self.visited_activities = set(state.get("visited_activities", []))
+            self.completed_tabs = set(state.get("completed_tabs", []))
+            self.screenshots_taken = state.get("screenshots_taken", 0)
+            print(f"[INFO] 恢复状态: 已截图 {self.screenshots_taken} 张, "
+                  f"已完成 {len(self.completed_tabs)} 个Tab, "
+                  f"已知 {len(self.visited_fingerprints)} 个指纹")
+        except (FileNotFoundError, json.JSONDecodeError):
+            print("[INFO] 无可恢复状态，从头开始")
+
+    def _save_state(self):
+        """保存当前遍历状态到 state.json"""
+        state = {
+            "visited_fingerprints": list(self.visited_fingerprints),
+            "visited_activities": list(self.visited_activities),
+            "completed_tabs": list(self.completed_tabs),
+            "screenshots_taken": self.screenshots_taken,
+            "timestamp": datetime.now().isoformat(),
+        }
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARN] 状态保存失败: {e}")
 
     def run(self) -> int:
         """执行 BFS 遍历"""
@@ -72,18 +110,22 @@ class TraversalEngine:
 
         if tab_count > 0:
             print(f"[INFO] 发现 {tab_count} 个有效 Tab\n")
-            # === 第一轮: 每个Tab做广度探索 ===
             for i in range(tab_count):
                 if self.screenshots_taken >= MAX_SCREENSHOTS:
                     break
+                # 跳过已完成的Tab
+                if i in self.completed_tabs:
+                    print(f"[INFO] Tab {i} 已完成，跳过")
+                    continue
                 self._explore_tab_by_order(i)
-
-            # === 第二轮: 对第一轮发现的有价值子页面，每个进入后再广度一层 ===
-            # （已在 _explore_page 中通过递归 depth 实现）
+                # 每完成一个Tab保存状态
+                self.completed_tabs.add(i)
+                self._save_state()
         else:
             print("[INFO] 未找到 Tab，直接探索当前页\n")
             self._ensure_on_main_page()
             self._explore_page(depth=0)
+            self._save_state()
 
         print(f"\n[DONE] BFS 遍历完成，共截图 {self.screenshots_taken} 张")
         return self.screenshots_taken

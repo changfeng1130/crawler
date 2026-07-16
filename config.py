@@ -64,5 +64,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 SCREENSHOT_DIR = os.path.join(OUTPUT_DIR, "screenshots")
 METADATA_CSV = os.path.join(OUTPUT_DIR, "metadata.csv")
+STATE_FILE = os.path.join(OUTPUT_DIR, "state.json")
 
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)

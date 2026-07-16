@@ -48,8 +48,13 @@ def launch_bilibili(serial: str):
 
 
 def main():
+    resume = "--resume" in sys.argv
+
     print("=" * 50)
-    print("  B站 App 自动遍历截图 Demo")
+    if resume:
+        print("  B站 App 自动遍历截图 (继续模式)")
+    else:
+        print("  B站 App 自动遍历截图 Demo")
     print("=" * 50)
     print()
 
@@ -63,6 +68,8 @@ def main():
     print(f"[INFO] 设备: {device_info['device_model']} (Android {device_info['android_version']})")
     print(f"[INFO] App: {PACKAGE_NAME} v{app_info['version_name']}")
     print(f"[INFO] 截图输出: {SCREENSHOT_DIR}")
+    if resume:
+        print(f"[INFO] 模式: 继续上次遍历")
     print()
 
     # 3. 初始化 CSV
@@ -76,7 +83,7 @@ def main():
     time.sleep(1)
 
     # 6. 开始遍历
-    engine = TraversalEngine(poco, serial, device_info, app_info)
+    engine = TraversalEngine(poco, serial, device_info, app_info, resume=resume)
     total = engine.run()
 
     # 7. 输出结果
