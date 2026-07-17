@@ -47,9 +47,12 @@ class TraversalEngine:
         self.app_info = app_info
 
         self.visited_fingerprints = {}     # {activity: [dhash1, dhash2, ...]}
-        self.visited_activities = set()
+        self.activity_visit_count = {}    # {activity: 进入次数}
         self.completed_tabs = set()
         self.screenshots_taken = 0
+
+        # 同一Activity最多进入次数（允许共用Activity的不同功能页被发现）
+        self.max_visits_per_activity = 3
 
         # 如果是resume模式，从state.json恢复状态
         if resume:
@@ -71,7 +74,7 @@ class TraversalEngine:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
             self.visited_fingerprints = state.get("visited_fingerprints", {})
-            self.visited_activities = set(state.get("visited_activities", []))
+            self.activity_visit_count = state.get("activity_visit_count", {})
             self.completed_tabs = set(state.get("completed_tabs", []))
             self.screenshots_taken = state.get("screenshots_taken", 0)
             fp_count = sum(len(v) for v in self.visited_fingerprints.values())
@@ -85,7 +88,7 @@ class TraversalEngine:
         """保存当前遍历状态到 state.json"""
         state = {
             "visited_fingerprints": self.visited_fingerprints,
-            "visited_activities": list(self.visited_activities),
+            "activity_visit_count": self.activity_visit_count,
             "completed_tabs": list(self.completed_tabs),
             "screenshots_taken": self.screenshots_taken,
             "timestamp": datetime.now().isoformat(),
@@ -292,8 +295,9 @@ class TraversalEngine:
                 time.sleep(BACK_WAIT)
                 continue
 
-            # 该Activity已访问过 → 快速返回（不等待、不dump）
-            if new_activity in self.visited_activities:
+            # 该Activity已访问过太多次 → 快速返回（不等待、不dump）
+            visit_count = self.activity_visit_count.get(new_activity, 0)
+            if visit_count >= self.max_visits_per_activity:
                 skipped += 1
                 self._go_back()
                 time.sleep(BACK_WAIT)
@@ -303,8 +307,8 @@ class TraversalEngine:
                 continue
 
             # === 到了新页面 ===
-            # 立刻标记该Activity已访问，后续同Activity的点击直接跳过
-            self.visited_activities.add(new_activity)
+            # 计数+1
+            self.activity_visit_count[new_activity] = visit_count + 1
 
             time.sleep(PAGE_LOAD_WAIT - 0.4)
             popup_handler.dismiss_popups(self.poco, max_attempts=2)
