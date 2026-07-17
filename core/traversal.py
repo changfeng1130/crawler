@@ -46,7 +46,7 @@ class TraversalEngine:
         self.device_info = device_info
         self.app_info = app_info
 
-        self.visited_fingerprints = set()
+        self.visited_fingerprints = {}     # {activity: [dhash1, dhash2, ...]}
         self.visited_activities = set()
         self.completed_tabs = set()
         self.screenshots_taken = 0
@@ -70,20 +70,21 @@ class TraversalEngine:
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
-            self.visited_fingerprints = set(state.get("visited_fingerprints", []))
+            self.visited_fingerprints = state.get("visited_fingerprints", {})
             self.visited_activities = set(state.get("visited_activities", []))
             self.completed_tabs = set(state.get("completed_tabs", []))
             self.screenshots_taken = state.get("screenshots_taken", 0)
+            fp_count = sum(len(v) for v in self.visited_fingerprints.values())
             print(f"[INFO] 恢复状态: 已截图 {self.screenshots_taken} 张, "
                   f"已完成 {len(self.completed_tabs)} 个Tab, "
-                  f"已知 {len(self.visited_fingerprints)} 个指纹")
+                  f"已知 {fp_count} 个指纹")
         except (FileNotFoundError, json.JSONDecodeError):
             print("[INFO] 无可恢复状态，从头开始")
 
     def _save_state(self):
         """保存当前遍历状态到 state.json"""
         state = {
-            "visited_fingerprints": list(self.visited_fingerprints),
+            "visited_fingerprints": self.visited_fingerprints,
             "visited_activities": list(self.visited_activities),
             "completed_tabs": list(self.completed_tabs),
             "screenshots_taken": self.screenshots_taken,
@@ -301,8 +302,8 @@ class TraversalEngine:
                 continue
 
             fp = fingerprint.generate(hierarchy, new_activity)
-            if fp in self.visited_fingerprints:
-                # 布局指纹已见过（同模板不同内容），快速返回
+            if fingerprint.find_similar(fp, self.visited_fingerprints):
+                # 布局dHash相似（同模板不同内容），快速返回
                 skipped += 1
                 self._go_back_to_activity(current_activity)
                 continue
@@ -378,14 +379,14 @@ class TraversalEngine:
             return False
 
         fp = fingerprint.generate(hierarchy, activity)
-        if fp in self.visited_fingerprints:
+        if fingerprint.find_similar(fp, self.visited_fingerprints):
             return False
 
         return self._do_screenshot(activity, depth, hierarchy, fp)
 
     def _do_screenshot(self, activity: str, depth: int, hierarchy: dict, fp: str) -> bool:
         """执行截图（指纹已计算好）"""
-        self.visited_fingerprints.add(fp)
+        fingerprint.add_fingerprint(fp, self.visited_fingerprints)
 
         if SKIP_BLOCKED_POPUPS and popup_handler.has_blocking_popup(self.poco):
             return False
