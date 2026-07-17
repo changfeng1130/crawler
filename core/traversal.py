@@ -292,7 +292,20 @@ class TraversalEngine:
                 time.sleep(BACK_WAIT)
                 continue
 
-            # === 到了新页面，检查布局指纹是否已见过 ===
+            # 该Activity已访问过 → 快速返回（不等待、不dump）
+            if new_activity in self.visited_activities:
+                skipped += 1
+                self._go_back()
+                time.sleep(BACK_WAIT)
+                if metadata.get_current_activity(self.serial) != current_activity:
+                    if not self._go_back_to_activity(current_activity):
+                        return
+                continue
+
+            # === 到了新页面 ===
+            # 立刻标记该Activity已访问，后续同Activity的点击直接跳过
+            self.visited_activities.add(new_activity)
+
             time.sleep(PAGE_LOAD_WAIT - 0.4)
             popup_handler.dismiss_popups(self.poco, max_attempts=2)
 
@@ -309,7 +322,6 @@ class TraversalEngine:
                 continue
 
             # 真正的新页面！
-            self.visited_activities.add(new_activity)
             print(f"  [BFS] 节点{idx} -> {new_activity.split('/')[-1]}")
 
             # 截图（指纹已经算过了，直接用）
@@ -584,6 +596,7 @@ class TraversalEngine:
                     "id": action_id,
                     "node": node,
                     "priority": priority,
+                    "x": pos[0],
                     "y": pos[1],
                 })
             except Exception:
@@ -591,20 +604,22 @@ class TraversalEngine:
 
         raw_actions.sort(key=lambda x: x["priority"], reverse=True)
 
-        # 按y坐标合并同卡片节点：y坐标差<0.03的视为同一张卡片，只保留优先级最高的
+        # 按位置合并同卡片节点：
+        # 两个节点的x和y坐标都很接近（同一块区域）时，只保留优先级最高的那个
+        # 阈值: y差<0.025 且 x差<0.15 视为同一张卡片内的元素
         actions = []
-        used_y_slots = []  # 已选中节点的y坐标
+        used_positions = []  # 已选中节点的(x, y)
         for action in raw_actions:
             y = action["y"]
-            # 检查是否与已选中的某个节点在同一卡片内
+            x = action.get("x", 0.5)
             is_duplicate = False
-            for used_y in used_y_slots:
-                if abs(y - used_y) < 0.03:
+            for ux, uy in used_positions:
+                if abs(y - uy) < 0.025 and abs(x - ux) < 0.15:
                     is_duplicate = True
                     break
             if is_duplicate:
                 continue
-            used_y_slots.append(y)
+            used_positions.append((x, y))
             actions.append(action)
 
         return actions
