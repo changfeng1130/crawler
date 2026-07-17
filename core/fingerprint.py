@@ -114,8 +114,12 @@ def quick_structure_key(hierarchy: dict, activity: str) -> str:
     """
     if not hierarchy:
         return ""
-    children = _get_visible_children(hierarchy)
-    types = [c.get("payload", {}).get("type", "?") for c in children]
+    children = hierarchy.get("children", [])
+    types = []
+    for child in children:
+        p = child.get("payload", {})
+        if p.get("visible", True):
+            types.append(p.get("type", "?"))
     return f"{activity}|{','.join(types)}"
 
 
