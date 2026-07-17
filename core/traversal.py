@@ -47,6 +47,7 @@ class TraversalEngine:
         self.app_info = app_info
 
         self.visited_fingerprints = {}     # {activity: [dhash1, dhash2, ...]}
+        self.visited_structure_keys = set()  # 快速结构key集合（Activity+第1层TypeName）
         self.activity_visit_count = {}    # {activity: 进入次数}
         self.completed_tabs = set()
         self.screenshots_taken = 0
@@ -74,6 +75,7 @@ class TraversalEngine:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
             self.visited_fingerprints = state.get("visited_fingerprints", {})
+            self.visited_structure_keys = set(state.get("visited_structure_keys", []))
             self.activity_visit_count = state.get("activity_visit_count", {})
             self.completed_tabs = set(state.get("completed_tabs", []))
             self.screenshots_taken = state.get("screenshots_taken", 0)
@@ -88,6 +90,7 @@ class TraversalEngine:
         """保存当前遍历状态到 state.json"""
         state = {
             "visited_fingerprints": self.visited_fingerprints,
+            "visited_structure_keys": list(self.visited_structure_keys),
             "activity_visit_count": self.activity_visit_count,
             "completed_tabs": list(self.completed_tabs),
             "screenshots_taken": self.screenshots_taken,
@@ -230,8 +233,8 @@ class TraversalEngine:
         # 列表页分段截图
         self._capture_scroll_segments(current_activity, depth)
 
-        # 收集当前页所有可点击节点
-        actions = self._get_actions()
+        # 收集当前页所有可点击节点（滚动多屏收集更多）
+        actions = self._collect_all_actions(current_activity)
         if not actions:
             return
 
@@ -318,14 +321,23 @@ class TraversalEngine:
                 self._go_back_to_activity(current_activity)
                 continue
 
-            fp = fingerprint.generate(hierarchy, new_activity)
-            if fingerprint.find_similar(fp, self.visited_fingerprints):
-                # 布局dHash相似（同模板不同内容），快速返回
+            # 快速预判：同Activity+同第1层结构 → 一定是同模板，跳过
+            struct_key = fingerprint.quick_structure_key(hierarchy, new_activity)
+            if struct_key and struct_key in self.visited_structure_keys:
                 skipped += 1
                 self._go_back_to_activity(current_activity)
                 continue
 
+            # dHash精确判断
+            fp = fingerprint.generate(hierarchy, new_activity)
+            if fingerprint.find_similar(fp, self.visited_fingerprints):
+                skipped += 1
+                self.visited_structure_keys.add(struct_key)
+                self._go_back_to_activity(current_activity)
+                continue
+
             # 真正的新页面！
+            self.visited_structure_keys.add(struct_key)
             print(f"  [BFS] 节点{idx} -> {new_activity.split('/')[-1]}")
 
             # 截图（指纹已经算过了，直接用）
@@ -550,6 +562,43 @@ class TraversalEngine:
     # ------------------------------------------------------------------
     # 控件
     # ------------------------------------------------------------------
+
+    def _collect_all_actions(self, current_activity: str) -> list:
+        """
+        滚动多屏收集所有可点击节点。
+        每屏收集后向下滚动，最多收集3屏，最后回到顶部。
+        用坐标去重（同位置节点不重复添加）。
+        """
+        all_action_ids = set()
+        all_actions = []
+
+        # 收集第一屏
+        actions = self._get_actions()
+        for a in actions:
+            all_action_ids.add(a["id"])
+            all_actions.append(a)
+
+        # 滚动收集更多屏（最多再滚2次）
+        for _ in range(2):
+            self._swipe(0.7, 0.3)
+            time.sleep(0.5)
+
+            # 确认没跳转
+            now = metadata.get_current_activity(self.serial)
+            if now != current_activity:
+                break
+
+            new_actions = self._get_actions()
+            for a in new_actions:
+                if a["id"] not in all_action_ids:
+                    all_action_ids.add(a["id"])
+                    all_actions.append(a)
+
+        # 回到顶部
+        self._scroll_to_top()
+        time.sleep(0.3)
+
+        return all_actions
 
     def _get_actions(self) -> list:
         """

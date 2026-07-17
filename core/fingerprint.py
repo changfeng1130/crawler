@@ -106,6 +106,19 @@ def is_same_page(fp1: str, fp2: str) -> bool:
     return distance < HAMMING_THRESHOLD
 
 
+def quick_structure_key(hierarchy: dict, activity: str) -> str:
+    """
+    快速结构key：Activity名 + 第1层可见子节点TypeName列表。
+    用于快速预判同模板（比dHash更快更稳定）。
+    同Activity+同第1层结构 = 一定是同模板。
+    """
+    if not hierarchy:
+        return ""
+    children = _get_visible_children(hierarchy)
+    types = [c.get("payload", {}).get("type", "?") for c in children]
+    return f"{activity}|{','.join(types)}"
+
+
 def find_similar(fp: str, visited_dict: dict) -> bool:
     """
     检查fp是否与已访问指纹中任一相似（同模板）。
