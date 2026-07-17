@@ -536,8 +536,11 @@ class TraversalEngine:
     # ------------------------------------------------------------------
 
     def _get_actions(self) -> list:
-        """获取当前页面所有可点击控件，按优先级排序"""
-        actions = []
+        """
+        获取当前页面所有可点击控件，按优先级排序。
+        同一卡片内的多个子元素（y坐标相近）只保留1个，避免重复进出。
+        """
+        raw_actions = []
         seen_ids = set()
         list_item_counts = {}
 
@@ -577,15 +580,33 @@ class TraversalEngine:
                 seen_ids.add(action_id)
 
                 priority = self._calc_priority(node_type, name, text)
-                actions.append({
+                raw_actions.append({
                     "id": action_id,
                     "node": node,
                     "priority": priority,
+                    "y": pos[1],
                 })
             except Exception:
                 continue
 
-        actions.sort(key=lambda x: x["priority"], reverse=True)
+        raw_actions.sort(key=lambda x: x["priority"], reverse=True)
+
+        # 按y坐标合并同卡片节点：y坐标差<0.03的视为同一张卡片，只保留优先级最高的
+        actions = []
+        used_y_slots = []  # 已选中节点的y坐标
+        for action in raw_actions:
+            y = action["y"]
+            # 检查是否与已选中的某个节点在同一卡片内
+            is_duplicate = False
+            for used_y in used_y_slots:
+                if abs(y - used_y) < 0.03:
+                    is_duplicate = True
+                    break
+            if is_duplicate:
+                continue
+            used_y_slots.append(y)
+            actions.append(action)
+
         return actions
 
     def _is_tab_node(self, name: str) -> bool:
