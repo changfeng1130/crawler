@@ -20,7 +20,8 @@ CANVAS_W = 64
 CANVAS_H = 128
 
 # 汉明距离阈值：小于此值认为是同一页面模板
-HAMMING_THRESHOLD = 5
+# 实测B站同页面滚动后距离约10-14，不同页面距离通常>20
+HAMMING_THRESHOLD = 12
 
 # 动态内容控件类型 → 绘制为黑块（内容不稳定，忽略具体内容）
 DYNAMIC_TYPES = {
