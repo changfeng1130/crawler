@@ -1,24 +1,22 @@
-"""BFS遍历引擎 + 动态深度
+"""BFS遍历引擎 — 进入即探索
 
 策略:
-  - BFS广度优先: 先把当前页面所有节点点完, 再处理子页面
-  - 动态深度: 有新模板就继续深入, 同一Activity连续碰到已知才停止
-  - 回退只按1次返回键, 失败则重启App
-  - 指纹去重: 结构key + dHash
-  - 队列任务记录Tab+action, 可从首页重放到达子页面
+  - 每个Tab收集所有可点击节点, 逐个点击
+  - 发现新页面: 截图 + 立即在子页面上做一轮广度探索 + 返回
+  - 子页面的探索只做1层(只截图不再递归)
+  - 回退只按1次返回键, 回不来则跳过继续下一个
+  - dHash指纹去重, 同模板不重复截图也不重复进入
 """
 
 import json
 import subprocess
 import time
-from collections import deque
 from datetime import datetime
 
 from core import fingerprint, popup_handler, screenshot, metadata, privacy
 from core.adb_bin import ADB
 from config import (
     PACKAGE_NAME,
-    LIST_ITEM_MAX_CLICK,
     MAX_SCREENSHOTS,
     SCROLL_MAX_TIMES,
     SCROLL_SEGMENT_WAIT,
@@ -32,8 +30,8 @@ from config import (
     STATE_FILE,
 )
 
-# 同一Activity连续多少次已知后停止(不同Activity不累计)
-MAX_CONSECUTIVE_KNOWN_SAME_ACTIVITY = 3
+# 同一Activity连续命中已知模板后不再等待加载直接返回
+MAX_CONSECUTIVE_KNOWN_SAME = 3
 
 LIST_CONTAINERS = {"RecyclerView", "ListView", "GridView", "ViewPager2"}
 TAB_ID_KEYWORDS = ("tab", "bottom_nav", "navigation")
@@ -113,46 +111,35 @@ class TraversalEngine:
             tab_count = self._count_valid_tabs()
             if tab_count > 0:
                 print(f"[INFO] 有效Tab: {tab_count}\n")
-                # 第一轮: 每个Tab广度探索当前屏幕
-                queue = deque()
+
+                # 每个Tab: 广度探索(子页面进入即探索)
                 for i in range(tab_count):
                     if self.screenshots_taken >= MAX_SCREENSHOTS:
                         break
                     if i in self.completed_tabs:
                         continue
-                    self._run_tab(i, queue)
+                    self._run_tab(i)
                     self.completed_tabs.add(i)
                     self._save_state()
 
-                # 第二轮: BFS处理子页面队列
-                if queue and self.screenshots_taken < MAX_SCREENSHOTS:
-                    print(f"\n[INFO] 第二轮: {len(queue)} 个子页面\n")
-                    self._process_queue(queue)
-                    self._save_state()
-
-                # 第三轮: 每个Tab滚动后发现新入口
+                # 滚动后再探索一轮
                 if self.screenshots_taken < MAX_SCREENSHOTS:
-                    print(f"\n[INFO] 第三轮: 滚动探索\n")
+                    print(f"\n[INFO] 滚动探索\n")
                     for i in range(tab_count):
                         if self.screenshots_taken >= MAX_SCREENSHOTS:
                             break
-                        self._scroll_tab(i, queue)
-                    if queue and self.screenshots_taken < MAX_SCREENSHOTS:
-                        self._process_queue(queue)
+                        self._scroll_tab(i)
                     self._save_state()
             else:
                 self._ensure_on_main_page()
-                queue = deque()
-                self._explore_current(None, queue)
-                self._process_queue(queue)
+                self._explore_page(can_recurse=True)
         except KeyboardInterrupt:
             print("\n[INFO] 中断, 保存状态...")
         finally:
             self._save_state()
             elapsed = time.monotonic() - self.run_started
             m, s = divmod(elapsed, 60)
-            print(f"\n[DONE] 截图 {self.screenshots_taken} 张, "
-                  f"用时 {int(m)}分{s:.0f}秒")
+            print(f"\n[DONE] 截图 {self.screenshots_taken} 张, 用时 {int(m)}分{s:.0f}秒")
 
         return self.screenshots_taken
 
@@ -160,16 +147,34 @@ class TraversalEngine:
     # Tab
     # ------------------------------------------------------------------
 
-    def _run_tab(self, order, queue):
+    def _run_tab(self, order):
         try:
             self._ensure_on_main_page()
             time.sleep(1.0)
             if not self._switch_tab(order):
                 return
             print(f"[TAB {order}] 开始")
-            self._explore_current(order, queue)
+            self._explore_page(can_recurse=True)
         except Exception as e:
             print(f"[TAB {order}] 异常: {e}")
+
+    def _scroll_tab(self, order):
+        try:
+            self._ensure_on_main_page()
+            time.sleep(0.5)
+            if not self._switch_tab(order):
+                return
+            for _ in range(3):
+                if self.screenshots_taken >= MAX_SCREENSHOTS:
+                    return
+                self._swipe(0.7, 0.3)
+                time.sleep(0.6)
+                activity = metadata.get_current_activity(self.serial)
+                if not activity or PACKAGE_NAME not in activity:
+                    break
+                self._explore_page(can_recurse=True)
+        except Exception:
+            pass
 
     def _switch_tab(self, order):
         tabs = self._find_tabs()
@@ -193,46 +198,16 @@ class TraversalEngine:
         except Exception:
             return False
 
-    def _scroll_tab(self, order, queue):
-        """切到Tab后向下滚动, 在新位置收集节点探索"""
-        try:
-            self._ensure_on_main_page()
-            time.sleep(0.5)
-            if not self._switch_tab(order):
-                return
-            for _ in range(3):
-                if self.screenshots_taken >= MAX_SCREENSHOTS:
-                    return
-                self._swipe(0.7, 0.3)
-                time.sleep(0.6)
-                activity = metadata.get_current_activity(self.serial)
-                if not activity or PACKAGE_NAME not in activity:
-                    break
-                self._explore_current(order, queue)
-        except Exception:
-            pass
-
-    def _swipe(self, y1, y2):
-        cx = self.screen_w // 2
-        try:
-            subprocess.run(
-                [ADB, "-s", self.serial, "shell", "input", "swipe",
-                 str(cx), str(int(self.screen_h * y1)),
-                 str(cx), str(int(self.screen_h * y2)), "400"],
-                capture_output=True, timeout=5,
-            )
-        except Exception:
-            pass
-
     # ------------------------------------------------------------------
-    # BFS核心
+    # 核心: 探索当前页面
     # ------------------------------------------------------------------
 
-    def _explore_current(self, tab_order, queue):
+    def _explore_page(self, can_recurse=False):
         """
-        探索当前页面所有节点.
-        新模板截图并加入queue, 已知模板跳过.
-        同一Activity连续3次已知则停止该类Activity的后续节点.
+        探索当前页面的所有可点击节点.
+
+        can_recurse=True:  发现新页面后进入子页面做一轮探索(不再递归)
+        can_recurse=False: 发现新页面只截图, 不进入探索(防止无限递归)
         """
         activity = metadata.get_current_activity(self.serial)
         if not activity or PACKAGE_NAME not in activity:
@@ -243,11 +218,12 @@ class TraversalEngine:
         # 截图当前页
         self._try_screenshot(activity)
 
+        # 收集所有可点击节点
         actions = self._get_actions()
         if not actions:
             return
 
-        # 记录每个目标Activity连续已知次数
+        # 按Activity记录连续已知次数
         known_counts = {}
 
         for action in actions:
@@ -280,17 +256,17 @@ class TraversalEngine:
                 time.sleep(BACK_WAIT)
                 continue
 
-            # 该Activity已连续多次跳到已知模板, 不再等待加载直接返回
-            if known_counts.get(new_activity, 0) >= MAX_CONSECUTIVE_KNOWN_SAME_ACTIVITY:
+            # 该Activity连续多次已知, 快速跳过不等加载
+            if known_counts.get(new_activity, 0) >= MAX_CONSECUTIVE_KNOWN_SAME:
                 self._go_back()
                 time.sleep(BACK_WAIT)
                 continue
 
-            # 等待加载
+            # 等待页面加载
             time.sleep(PAGE_LOAD_WAIT - 0.4)
             popup_handler.dismiss_popups(self.poco, max_attempts=2)
 
-            # 判重
+            # dHash判重
             if self._is_known_page(new_activity):
                 known_counts[new_activity] = known_counts.get(new_activity, 0) + 1
                 self._go_back()
@@ -300,73 +276,19 @@ class TraversalEngine:
             # 新模板! 截图
             known_counts[new_activity] = 0
             self._try_screenshot(new_activity)
-            # 加入队列(记录tab和action用于后续重放)
-            queue.append({"tab": tab_order, "action": action})
 
-            # 返回当前页
+            # 如果允许递归, 在子页面上做一轮广度探索(不再递归)
+            if can_recurse:
+                self._explore_page(can_recurse=False)
+
+            # 返回父页面
             self._go_back()
             time.sleep(BACK_WAIT)
             now = metadata.get_current_activity(self.serial)
             if now != activity:
                 if not self._back_to(activity):
+                    # 回不来, 跳过剩余节点
                     break
-
-    def _process_queue(self, queue):
-        """BFS处理队列: 逐个进入子页面探索"""
-        while queue and self.screenshots_taken < MAX_SCREENSHOTS:
-            task = queue.popleft()
-            tab_order = task["tab"]
-            action = task["action"]
-
-            # 导航: 回首页 -> 切Tab -> 点击节点进入子页面
-            if not self._navigate_to_child(tab_order, action):
-                continue
-
-            # 在子页面上继续广度探索
-            self._explore_current(tab_order, queue)
-
-            # 返回
-            self._go_back()
-            time.sleep(BACK_WAIT)
-
-    def _navigate_to_child(self, tab_order, action):
-        """导航到子页面: 回首页 -> 切Tab -> 点击action"""
-        try:
-            self._ensure_on_main_page()
-            time.sleep(0.5)
-
-            if tab_order is not None:
-                if not self._switch_tab(tab_order):
-                    return False
-
-            # 重新点击
-            return self._replay_click(action)
-        except Exception:
-            return False
-
-    def _replay_click(self, action):
-        """重新点击节点(先尝试直接引用, 再用id查找)"""
-        try:
-            if self._click(action):
-                time.sleep(PAGE_LOAD_WAIT)
-                popup_handler.dismiss_popups(self.poco, max_attempts=2)
-                return True
-        except Exception:
-            pass
-
-        # 引用失效, 用id重新查找
-        try:
-            action_id = action.get("id", "")
-            actions = self._get_actions()
-            for a in actions:
-                if a["id"] == action_id:
-                    if self._click(a):
-                        time.sleep(PAGE_LOAD_WAIT)
-                        popup_handler.dismiss_popups(self.poco, max_attempts=2)
-                        return True
-        except Exception:
-            pass
-        return False
 
     # ------------------------------------------------------------------
     # 判重与截图
@@ -419,8 +341,7 @@ class TraversalEngine:
                 metadata.append_record(record)
                 self.screenshots_taken += 1
                 elapsed = time.monotonic() - self.run_started
-                print(f"  [{self.screenshots_taken}] {activity.split('/')[-1]} "
-                      f"({elapsed:.0f}s)")
+                print(f"  [{self.screenshots_taken}] {activity.split('/')[-1]} ({elapsed:.0f}s)")
                 return True
             return False
         except Exception:
@@ -430,18 +351,17 @@ class TraversalEngine:
     # 导航
     # ------------------------------------------------------------------
 
-    def _back_to(self, target_activity):
-        """尝试按返回键回到目标Activity"""
+    def _back_to(self, target):
         for _ in range(3):
             now = metadata.get_current_activity(self.serial)
-            if now == target_activity:
+            if now == target:
                 return True
             if not now or PACKAGE_NAME not in now:
                 self._ensure_on_main_page()
-                return metadata.get_current_activity(self.serial) == target_activity
+                return metadata.get_current_activity(self.serial) == target
             self._go_back()
             time.sleep(BACK_WAIT)
-        return metadata.get_current_activity(self.serial) == target_activity
+        return metadata.get_current_activity(self.serial) == target
 
     def _handle_left_app(self):
         try:
@@ -577,13 +497,12 @@ class TraversalEngine:
 
         raw.sort(key=lambda a: a["priority"], reverse=True)
 
-        # 卡片合并: 只对低优先级节点做(priority < 60, 即普通列表项)
-        # 高优先级节点(导航入口/Tab/搜索等)不合并, 保证全覆盖
+        # 卡片合并: 只对低优先级节点(列表项)做位置去重
+        # 高优先级节点(导航/搜索/频道入口)不合并, 全部保留
         result = []
         used = []
         for a in raw:
             if a["priority"] < 60:
-                # 低优先级: 检查是否与已选节点位置重叠
                 dup = False
                 for ux, uy in used:
                     if abs(a["y"] - uy) < 0.02 and abs(a["x"] - ux) < 0.1:
@@ -637,6 +556,18 @@ class TraversalEngine:
             return self.poco.agent.hierarchy.dump()
         except Exception:
             return None
+
+    def _swipe(self, y1, y2):
+        cx = self.screen_w // 2
+        try:
+            subprocess.run(
+                [ADB, "-s", self.serial, "shell", "input", "swipe",
+                 str(cx), str(int(self.screen_h * y1)),
+                 str(cx), str(int(self.screen_h * y2)), "400"],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 辅助
