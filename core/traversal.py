@@ -1,12 +1,13 @@
-"""BFS 遍历引擎——广度优先
+"""DFS 遍历引擎——深度优先
 
 流程:
-  1. 依次点击每个 Tab，在每个 Tab 页面上做广度探索
-  2. 广度探索: 收集当前页面所有可点击节点，逐个点击
-     - 跳转到新Activity → 截图 → 立即返回
+  1. 第一阶段依次遍历每个 Tab：只截当前屏，不滚动
+  2. 所有 Tab 普通遍历完成后，从 Tab 0 开始第二阶段滚动遍历
+  3. 收集当前页面可点击节点，逐个点击
+     - 跳转到新Activity → 截图 → 立即递归探索该页面 → 返回父页面
      - 没跳转 → 继续下一个
-  3. 所有 Tab 的第一层点完后，对发现的有价值子页面做第二轮
-  4. 同一Activity只进1次，已访问过的直接跳过不点击
+  4. 子页面分支完成后，再继续父页面的下一个节点
+  5. Activity访问次数、结构key和dHash共同防止重复遍历
 """
 
 import json
@@ -38,7 +39,7 @@ TAB_ID_KEYWORDS = ("tab", "bottom_nav", "navigation")
 
 
 class TraversalEngine:
-    """BFS 遍历引擎"""
+    """DFS 遍历引擎"""
 
     def __init__(self, poco, serial: str, device_info: dict, app_info: dict, resume: bool = False):
         self.poco = poco
@@ -50,6 +51,9 @@ class TraversalEngine:
         self.visited_structure_keys = set()  # 快速结构key集合（Activity+第1层TypeName）
         self.activity_visit_count = {}    # {activity: 进入次数}
         self.completed_tabs = set()
+        self.completed_scroll_tabs = set()
+        # 只用于当前进程的滚动阶段，防止已知页面之间循环递归。
+        self.scroll_explored_fingerprints = {}
         self.screenshots_taken = 0
 
         # 同一Activity最多进入次数（允许共用Activity的不同功能页被发现）
@@ -78,10 +82,12 @@ class TraversalEngine:
             self.visited_structure_keys = set(state.get("visited_structure_keys", []))
             self.activity_visit_count = state.get("activity_visit_count", {})
             self.completed_tabs = set(state.get("completed_tabs", []))
+            self.completed_scroll_tabs = set(state.get("completed_scroll_tabs", []))
             self.screenshots_taken = state.get("screenshots_taken", 0)
             fp_count = sum(len(v) for v in self.visited_fingerprints.values())
             print(f"[INFO] 恢复状态: 已截图 {self.screenshots_taken} 张, "
-                  f"已完成 {len(self.completed_tabs)} 个Tab, "
+                  f"普通遍历已完成 {len(self.completed_tabs)} 个Tab, "
+                  f"滚动遍历已完成 {len(self.completed_scroll_tabs)} 个Tab, "
                   f"已知 {fp_count} 个指纹")
         except (FileNotFoundError, json.JSONDecodeError):
             print("[INFO] 无可恢复状态，从头开始")
@@ -93,6 +99,7 @@ class TraversalEngine:
             "visited_structure_keys": list(self.visited_structure_keys),
             "activity_visit_count": self.activity_visit_count,
             "completed_tabs": list(self.completed_tabs),
+            "completed_scroll_tabs": list(self.completed_scroll_tabs),
             "screenshots_taken": self.screenshots_taken,
             "timestamp": datetime.now().isoformat(),
         }
@@ -103,8 +110,8 @@ class TraversalEngine:
             print(f"[WARN] 状态保存失败: {e}")
 
     def run(self) -> int:
-        """执行 BFS 遍历"""
-        print("[INFO] 开始 BFS 遍历...")
+        """执行 DFS 遍历"""
+        print("[INFO] 开始 DFS 遍历...")
 
         try:
             dismissed = popup_handler.dismiss_popups(self.poco)
@@ -117,25 +124,58 @@ class TraversalEngine:
 
             if tab_count > 0:
                 print(f"[INFO] 发现 {tab_count} 个有效 Tab\n")
+
+                print("[INFO] === 第一阶段: 普通DFS遍历（不滚动） ===\n")
                 for i in range(tab_count):
                     if self.screenshots_taken >= MAX_SCREENSHOTS:
                         break
                     if i in self.completed_tabs:
-                        print(f"[INFO] Tab {i} 已完成，跳过")
+                        print(f"[INFO] Tab {i} 普通遍历已完成，跳过")
                         continue
-                    self._explore_tab_by_order(i)
-                    self.completed_tabs.add(i)
+                    completed = self._explore_tab_by_order(i, scroll_mode=False)
+                    if completed:
+                        self.completed_tabs.add(i)
+                    else:
+                        print(f"[WARN] Tab {i} 普通遍历未完成，保留为待重试")
                     self._save_state()
+
+                normal_complete = all(i in self.completed_tabs for i in range(tab_count))
+                if not normal_complete:
+                    pending = [i for i in range(tab_count) if i not in self.completed_tabs]
+                    print(
+                        f"\n[WARN] 普通遍历尚未全部完成，暂不启动滚动阶段: "
+                        f"pending_tabs={pending}"
+                    )
+                elif self.screenshots_taken < MAX_SCREENSHOTS:
+                    print("\n[INFO] === 第二阶段: 从Tab 0开始滚动DFS遍历 ===\n")
+                    self.scroll_explored_fingerprints = {}
+                    for i in range(tab_count):
+                        if self.screenshots_taken >= MAX_SCREENSHOTS:
+                            break
+                        if i in self.completed_scroll_tabs:
+                            print(f"[INFO] Tab {i} 滚动遍历已完成，跳过")
+                            continue
+                        completed = self._explore_tab_by_order(i, scroll_mode=True)
+                        if completed:
+                            self.completed_scroll_tabs.add(i)
+                        else:
+                            print(f"[WARN] Tab {i} 滚动遍历未完成，保留为待重试")
+                        self._save_state()
             else:
-                print("[INFO] 未找到 Tab，直接探索当前页\n")
+                print("[INFO] 未找到 Tab，先普通遍历当前页\n")
                 self._ensure_on_main_page()
-                self._explore_page(depth=0)
+                self._explore_page(depth=0, scroll_mode=False)
+                if self.screenshots_taken < MAX_SCREENSHOTS:
+                    print("\n[INFO] === 普通遍历完成，重新回到首页开始滚动 ===\n")
+                    self._ensure_on_main_page()
+                    self.scroll_explored_fingerprints = {}
+                    self._explore_page(depth=0, scroll_mode=True)
         except KeyboardInterrupt:
             print("\n[INFO] 用户中断，保存状态...")
         finally:
             self._save_state()
 
-        print(f"\n[DONE] BFS 遍历完成，共截图 {self.screenshots_taken} 张")
+        print(f"\n[DONE] DFS 遍历完成，共截图 {self.screenshots_taken} 张")
         return self.screenshots_taken
 
     # ------------------------------------------------------------------
@@ -153,10 +193,11 @@ class TraversalEngine:
                 count += 1
         return count
 
-    def _explore_tab_by_order(self, order: int):
+    def _explore_tab_by_order(self, order: int, scroll_mode: bool = False):
         """
         按顺序点击第 order 个有效Tab（跳过发布按钮）。
         每次从首页重新查找Tab列表，避免引用失效。
+        返回该Tab是否完成或按规则跳过。
         """
         self._ensure_on_main_page()
         time.sleep(1.5)  # 等待首页Tab栏完全加载
@@ -168,7 +209,7 @@ class TraversalEngine:
             tabs = self._find_tabs()
         if not tabs:
             print(f"[WARN] 找不到Tab栏，跳过")
-            return
+            return False
 
         # 找到第 order 个非发布按钮的Tab
         valid_idx = -1
@@ -178,12 +219,16 @@ class TraversalEngine:
             valid_idx += 1
             if valid_idx == order:
                 # 点击这个Tab
-                print(f"[INFO] === 有效Tab {order} (原始位置{i}) 探索开始 ===")
+                phase = "滚动" if scroll_mode else "普通"
+                print(
+                    f"[INFO] === {phase}遍历 Tab {order} "
+                    f"(原始位置{i}) 开始 ==="
+                )
                 try:
                     tab.click()
                 except Exception:
                     print(f"[WARN] Tab点击失败，跳过")
-                    return
+                    return False
 
                 time.sleep(PAGE_LOAD_WAIT)
                 popup_handler.dismiss_popups(self.poco, max_attempts=2)
@@ -191,30 +236,33 @@ class TraversalEngine:
                 # 检查是否为功能页或个人页
                 activity = metadata.get_current_activity(self.serial)
                 if not activity or PACKAGE_NAME not in activity:
-                    return
+                    return False
                 if any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
                     print(f"  [SKIP] 功能页: {activity.split('/')[-1]}")
-                    return
+                    return True
                 if SKIP_PERSONAL_PAGES:
                     hierarchy = self._dump_hierarchy()
                     if hierarchy and privacy.is_personal_page(hierarchy, activity):
                         print(f"  [SKIP] 个人页: {activity.split('/')[-1]}")
-                        return
+                        return True
 
                 # 探索这个Tab页面
-                self._explore_page(depth=0)
-                return
+                self._explore_page(depth=0, scroll_mode=scroll_mode)
+                return True
+
+        print(f"[WARN] 未找到顺序为 {order} 的有效Tab")
+        return False
 
     # ------------------------------------------------------------------
-    # 广度探索核心
+    # 深度探索核心
     # ------------------------------------------------------------------
 
-    def _explore_page(self, depth: int):
+    def _explore_page(self, depth: int, scroll_mode: bool = False):
         """
-        广度探索当前页面:
+        深度探索当前页面:
         1. 截图当前页
-        2. 收集所有可点击节点
-        3. 逐个点击: 新Activity → 截图 → 如果depth允许则继续探索一层 → 返回
+        2. 普通阶段只收集当前屏节点；滚动阶段截取分段图并收集多屏节点
+        3. 逐个点击: 新Activity → 截图 → 立即递归探索 → 返回父页面
         """
         if depth > MAX_DEPTH:
             return
@@ -227,20 +275,34 @@ class TraversalEngine:
         if any(kw in current_activity for kw in SKIP_ACTIVITY_KEYWORDS):
             return
 
+        if scroll_mode:
+            # 滚动阶段会重新进入普通阶段已知页面，单独的指纹集用来防止循环。
+            scroll_hierarchy = self._dump_hierarchy()
+            if not scroll_hierarchy:
+                return
+            scroll_fp = fingerprint.generate(scroll_hierarchy, current_activity)
+            if fingerprint.find_similar(scroll_fp, self.scroll_explored_fingerprints):
+                return
+            fingerprint.add_fingerprint(scroll_fp, self.scroll_explored_fingerprints)
+
         # 截图当前页
         self._try_screenshot(current_activity, depth)
 
-        # 列表页分段截图
-        self._capture_scroll_segments(current_activity, depth)
-
-        # 收集当前页所有可点击节点（滚动多屏收集更多）
-        actions = self._collect_all_actions(current_activity)
+        if scroll_mode:
+            # 只有第二阶段才执行滚动分段截图和多屏动作收集。
+            self._capture_scroll_segments(current_activity, depth)
+            actions = self._collect_all_actions(current_activity)
+        else:
+            actions = self._get_actions()
         if not actions:
             return
 
-        print(f"  [BFS] depth={depth} {current_activity.split('/')[-1]} 节点={len(actions)}")
+        phase = "SCROLL" if scroll_mode else "NORMAL"
+        print(
+            f"  [DFS-{phase}] depth={depth} "
+            f"{current_activity.split('/')[-1]} 节点={len(actions)}"
+        )
 
-        discovered_pages = []  # 本页发现的新Activity，第二遍再深入
         skipped = 0
 
         for idx, action in enumerate(actions):
@@ -300,7 +362,7 @@ class TraversalEngine:
 
             # 该Activity已访问过太多次 → 快速返回（不等待、不dump）
             visit_count = self.activity_visit_count.get(new_activity, 0)
-            if visit_count >= self.max_visits_per_activity:
+            if not scroll_mode and visit_count >= self.max_visits_per_activity:
                 skipped += 1
                 self._go_back()
                 time.sleep(BACK_WAIT)
@@ -311,7 +373,8 @@ class TraversalEngine:
 
             # === 到了新页面 ===
             # 计数+1
-            self.activity_visit_count[new_activity] = visit_count + 1
+            if not scroll_mode:
+                self.activity_visit_count[new_activity] = visit_count + 1
 
             time.sleep(PAGE_LOAD_WAIT - 0.4)
             popup_handler.dismiss_popups(self.poco, max_attempts=2)
@@ -325,6 +388,8 @@ class TraversalEngine:
             struct_key = fingerprint.quick_structure_key(hierarchy, new_activity)
             if struct_key and struct_key in self.visited_structure_keys:
                 skipped += 1
+                if scroll_mode and depth + 1 <= MAX_DEPTH:
+                    self._explore_page(depth + 1, scroll_mode=True)
                 self._go_back_to_activity(current_activity)
                 continue
 
@@ -333,55 +398,37 @@ class TraversalEngine:
             if fingerprint.find_similar(fp, self.visited_fingerprints):
                 skipped += 1
                 self.visited_structure_keys.add(struct_key)
+                if scroll_mode and depth + 1 <= MAX_DEPTH:
+                    self._explore_page(depth + 1, scroll_mode=True)
                 self._go_back_to_activity(current_activity)
                 continue
 
             # 真正的新页面！
             self.visited_structure_keys.add(struct_key)
-            print(f"  [BFS] 节点{idx} -> {new_activity.split('/')[-1]}")
+            print(
+                f"  [DFS] depth={depth} 节点{idx} -> "
+                f"{new_activity.split('/')[-1]}"
+            )
 
             # 截图（指纹已经算过了，直接用）
             took = self._do_screenshot(new_activity, depth + 1, hierarchy, fp)
-            if took:
-                discovered_pages.append(action)
+            if took and depth + 1 <= MAX_DEPTH and self.screenshots_taken < MAX_SCREENSHOTS:
+                print(
+                    f"  [DFS] 深入: depth={depth + 1} "
+                    f"{new_activity.split('/')[-1]}"
+                )
+                self._explore_page(depth + 1, scroll_mode=scroll_mode)
 
-            # 返回当前页
-            self._go_back_to_activity(current_activity)
+            # 子分支完成后必须恢复父页面，才能继续下一个动作。
+            if not self._go_back_to_activity(current_activity):
+                print(
+                    f"[WARN] DFS无法恢复父页面，终止当前分支: "
+                    f"depth={depth}, target={current_activity}"
+                )
+                return
 
         if skipped > 0:
-            print(f"  [BFS] 快速跳过 {skipped} 个已知节点")
-
-        # 本页节点全部点完后，对发现的有价值子页面做第二层探索
-        if discovered_pages and depth + 1 <= MAX_DEPTH and self.screenshots_taken < MAX_SCREENSHOTS:
-            for action in discovered_pages:
-                if self.screenshots_taken >= MAX_SCREENSHOTS:
-                    break
-
-                # 确认在当前页
-                now = metadata.get_current_activity(self.serial)
-                if now != current_activity:
-                    if not self._go_back_to_activity(current_activity):
-                        break
-
-                # 重新点击进入子页面
-                if not self._click(action):
-                    continue
-                time.sleep(PAGE_LOAD_WAIT)
-                popup_handler.dismiss_popups(self.poco, max_attempts=2)
-
-                child_activity = metadata.get_current_activity(self.serial)
-                if not child_activity or child_activity == current_activity:
-                    continue
-                if PACKAGE_NAME not in child_activity:
-                    self._ensure_on_main_page()
-                    self._go_back_to_activity(current_activity)
-                    continue
-
-                # 在子页面做广度探索
-                self._explore_page(depth + 1)
-
-                # 返回
-                self._go_back_to_activity(current_activity)
+            print(f"  [DFS] 快速跳过 {skipped} 个已知节点")
 
     # ------------------------------------------------------------------
     # 截图
