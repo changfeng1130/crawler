@@ -113,7 +113,7 @@ class TraversalEngine:
             tab_count = self._count_valid_tabs()
             if tab_count > 0:
                 print(f"[INFO] 有效Tab: {tab_count}\n")
-                # 第一轮: 每个Tab广度探索, 发现的子页面放入全局队列
+                # 第一轮: 每个Tab广度探索当前屏幕
                 queue = deque()
                 for i in range(tab_count):
                     if self.screenshots_taken >= MAX_SCREENSHOTS:
@@ -124,10 +124,22 @@ class TraversalEngine:
                     self.completed_tabs.add(i)
                     self._save_state()
 
-                # 第二轮: BFS处理队列中的子页面
-                if queue:
-                    print(f"\n[INFO] 第二轮: 探索 {len(queue)} 个子页面\n")
-                self._process_queue(queue)
+                # 第二轮: BFS处理子页面队列
+                if queue and self.screenshots_taken < MAX_SCREENSHOTS:
+                    print(f"\n[INFO] 第二轮: {len(queue)} 个子页面\n")
+                    self._process_queue(queue)
+                    self._save_state()
+
+                # 第三轮: 每个Tab滚动后发现新入口
+                if self.screenshots_taken < MAX_SCREENSHOTS:
+                    print(f"\n[INFO] 第三轮: 滚动探索\n")
+                    for i in range(tab_count):
+                        if self.screenshots_taken >= MAX_SCREENSHOTS:
+                            break
+                        self._scroll_tab(i, queue)
+                    if queue and self.screenshots_taken < MAX_SCREENSHOTS:
+                        self._process_queue(queue)
+                    self._save_state()
             else:
                 self._ensure_on_main_page()
                 queue = deque()
@@ -180,6 +192,37 @@ class TraversalEngine:
             return True
         except Exception:
             return False
+
+    def _scroll_tab(self, order, queue):
+        """切到Tab后向下滚动, 在新位置收集节点探索"""
+        try:
+            self._ensure_on_main_page()
+            time.sleep(0.5)
+            if not self._switch_tab(order):
+                return
+            for _ in range(3):
+                if self.screenshots_taken >= MAX_SCREENSHOTS:
+                    return
+                self._swipe(0.7, 0.3)
+                time.sleep(0.6)
+                activity = metadata.get_current_activity(self.serial)
+                if not activity or PACKAGE_NAME not in activity:
+                    break
+                self._explore_current(order, queue)
+        except Exception:
+            pass
+
+    def _swipe(self, y1, y2):
+        cx = self.screen_w // 2
+        try:
+            subprocess.run(
+                [ADB, "-s", self.serial, "shell", "input", "swipe",
+                 str(cx), str(int(self.screen_h * y1)),
+                 str(cx), str(int(self.screen_h * y2)), "400"],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # BFS核心
@@ -339,14 +382,8 @@ class TraversalEngine:
                 if privacy.is_personal_page(hierarchy, activity):
                     return True
 
-            struct_key = fingerprint.quick_structure_key(hierarchy, activity)
-            if struct_key and struct_key in self.visited_structure_keys:
-                return True
-
             fp = fingerprint.generate(hierarchy, activity)
             if fingerprint.find_similar(fp, self.visited_fingerprints):
-                if struct_key:
-                    self.visited_structure_keys.add(struct_key)
                 return True
 
             return False
@@ -363,19 +400,11 @@ class TraversalEngine:
                 if privacy.is_personal_page(hierarchy, activity):
                     return False
 
-            struct_key = fingerprint.quick_structure_key(hierarchy, activity)
-            if struct_key and struct_key in self.visited_structure_keys:
-                return False
-
             fp = fingerprint.generate(hierarchy, activity)
             if fingerprint.find_similar(fp, self.visited_fingerprints):
-                if struct_key:
-                    self.visited_structure_keys.add(struct_key)
                 return False
 
             # 新模板
-            if struct_key:
-                self.visited_structure_keys.add(struct_key)
             fingerprint.add_fingerprint(fp, self.visited_fingerprints)
 
             if SKIP_BLOCKED_POPUPS and popup_handler.has_blocking_popup(self.poco):
@@ -510,7 +539,6 @@ class TraversalEngine:
     def _get_actions(self):
         raw = []
         seen = set()
-        list_counts = {}
 
         try:
             nodes = self.poco(touchable=True)
@@ -529,23 +557,16 @@ class TraversalEngine:
                     if self._is_tab_node(name):
                         continue
 
-                    ptype = self._parent_type(node)
-                    if ptype in LIST_CONTAINERS:
-                        pid = self._parent_id(node)
-                        c = list_counts.get(pid, 0)
-                        if c >= LIST_ITEM_MAX_CLICK:
-                            continue
-                        list_counts[pid] = c + 1
-
                     aid = self._action_id(ntype, name, text, pos)
                     if aid in seen:
                         continue
                     seen.add(aid)
 
+                    priority = self._priority(ntype, name, text)
                     raw.append({
                         "id": aid,
                         "node": node,
-                        "priority": self._priority(ntype, name, text),
+                        "priority": priority,
                         "x": pos[0],
                         "y": pos[1],
                     })
@@ -556,18 +577,21 @@ class TraversalEngine:
 
         raw.sort(key=lambda a: a["priority"], reverse=True)
 
-        # 同卡片合并
+        # 卡片合并: 只对低优先级节点做(priority < 60, 即普通列表项)
+        # 高优先级节点(导航入口/Tab/搜索等)不合并, 保证全覆盖
         result = []
         used = []
         for a in raw:
-            dup = False
-            for ux, uy in used:
-                if abs(a["y"] - uy) < 0.025 and abs(a["x"] - ux) < 0.15:
-                    dup = True
-                    break
-            if dup:
-                continue
-            used.append((a["x"], a["y"]))
+            if a["priority"] < 60:
+                # 低优先级: 检查是否与已选节点位置重叠
+                dup = False
+                for ux, uy in used:
+                    if abs(a["y"] - uy) < 0.02 and abs(a["x"] - ux) < 0.1:
+                        dup = True
+                        break
+                if dup:
+                    continue
+                used.append((a["x"], a["y"]))
             result.append(a)
 
         return result
