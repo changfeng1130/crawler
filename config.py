@@ -40,9 +40,10 @@ POPUP_OCCLUSION_RATIO = 0.5
 SKIP_PERSONAL_PAGES = True
 # 遮挡弹窗跳过截图 —— 先关闭以保证遍历覆盖（弹窗仍会尝试关闭，只是不因此跳过截图）
 SKIP_BLOCKED_POPUPS = False
-PRIVACY_ACTIVITY_KEYWORDS = ["Profile", "MineActivity", "Account", "UserInfo", "PersonalInfo"]
-PRIVACY_ID_KEYWORDS = ["profile", "mine", "user_card", "personal", "user_info", "mine_header", "mine_layout"]
-PRIVACY_TEXT_KEYWORDS = ["个人主页", "编辑资料", "粉丝", "获赞", "我的钱包", "我的订单", "收藏", "浏览记录", "关注", "粉丝"]
+PRIVACY_ACTIVITY_KEYWORDS = ["ProfileActivity", "MineActivity", "UserInfoActivity", "PersonalInfoActivity"]
+PRIVACY_ID_KEYWORDS = ["user_card", "personal_info", "mine_header", "mine_layout", "profile_header"]
+PRIVACY_TEXT_KEYWORDS = ["编辑资料", "获赞与收藏", "我的钱包", "我的订单", "浏览记录"]
+PRIVACY_TEXT_MIN_HITS = 2  # 至少命中2个才判定为个人页
 
 # 不可点击的控件文本（危险操作或无效操作）
 SKIP_TEXTS = [
