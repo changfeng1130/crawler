@@ -153,6 +153,7 @@ class TraversalEngine:
             self._ensure_on_main_page()
             time.sleep(1.0)
             if not self._switch_tab(order):
+                print(f"[TAB {order}] 切换失败, 跳过")
                 return
             print(f"[TAB {order}] 开始")
             self._explore_page(can_recurse=True)
@@ -181,6 +182,7 @@ class TraversalEngine:
         tabs = self._find_tabs()
         valid = [t for t in tabs if not self._is_publish_button(t)]
         if order >= len(valid):
+            print(f"  [DEBUG] Tab {order}: 超出有效Tab数({len(valid)})")
             return False
         try:
             valid[order].click()
@@ -188,15 +190,19 @@ class TraversalEngine:
             popup_handler.dismiss_popups(self.poco, max_attempts=2)
             activity = metadata.get_current_activity(self.serial)
             if not activity or PACKAGE_NAME not in activity:
+                print(f"  [DEBUG] Tab {order}: 不在App内, activity={activity}")
                 return False
             if any(kw in activity for kw in SKIP_ACTIVITY_KEYWORDS):
+                print(f"  [DEBUG] Tab {order}: 命中SKIP_ACTIVITY, activity={activity}")
                 return False
             if SKIP_PERSONAL_PAGES:
                 h = self._dump_hierarchy()
                 if h and privacy.is_personal_page(h, activity):
+                    print(f"  [DEBUG] Tab {order}: 被判定为个人页, activity={activity}")
                     return False
             return True
-        except Exception:
+        except Exception as e:
+            print(f"  [DEBUG] Tab {order}: 异常 {e}")
             return False
 
     # ------------------------------------------------------------------
@@ -385,6 +391,7 @@ class TraversalEngine:
             activity = metadata.get_current_activity(self.serial)
             if self._is_main_activity(activity):
                 return
+            print(f"  [DEBUG] 不在首页, 当前activity={activity}, 尝试返回")
             if activity and PACKAGE_NAME in activity:
                 for _ in range(5):
                     self._go_back()
@@ -396,6 +403,7 @@ class TraversalEngine:
                         break
         except Exception:
             pass
+        print(f"  [DEBUG] 返回首页失败, 重启App")
         self._restart_app()
         time.sleep(1)
 
