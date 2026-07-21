@@ -17,6 +17,7 @@ from core import fingerprint, popup_handler, screenshot, metadata, privacy
 from core.adb_bin import ADB
 from config import (
     PACKAGE_NAME,
+    MAIN_ACTIVITY_KEYWORD,
     MAX_SCREENSHOTS,
     SCROLL_MAX_TIMES,
     SCROLL_SEGMENT_WAIT,
@@ -399,7 +400,7 @@ class TraversalEngine:
         time.sleep(1)
 
     def _is_main_activity(self, activity):
-        return bool(activity) and "MainActivityV2" in activity and PACKAGE_NAME in activity
+        return bool(activity) and MAIN_ACTIVITY_KEYWORD in activity and PACKAGE_NAME in activity
 
     # ------------------------------------------------------------------
     # Tab查找
@@ -448,7 +449,7 @@ class TraversalEngine:
             name = node.attr("name") or ""
             content = text + desc + name
             return any(kw in content for kw in
-                       ["+", "发布", "拍摄", "publish", "create", "CenterPlus", "投稿"])
+                       ["+", "发布", "拍摄", "publish", "create", "CenterPlus", "投稿", "post"])
         except Exception:
             return False
 

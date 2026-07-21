@@ -7,7 +7,7 @@ import time
 from airtest.core.api import connect_device
 from poco.drivers.android.uiautomation import AndroidUiautomationPoco
 
-from config import CONNECTION_MODE, WIFI_ADB_HOST, WIFI_ADB_PORT
+from config import CONNECTION_MODE, WIFI_ADB_HOST, WIFI_ADB_PORT, EMULATOR_HOST, EMULATOR_PORT
 from core.adb_bin import ADB
 
 
@@ -110,12 +110,51 @@ def _connect_usb() -> str:
     return serial
 
 
+def _connect_emulator() -> str:
+    """连接本地 Android 模拟器（MuMu 等）"""
+    serial = f"{EMULATOR_HOST}:{EMULATOR_PORT}"
+
+    existing = get_connected_serial()
+    if existing == serial:
+        print(f"[INFO] 模拟器已连接: {serial}")
+        return serial
+
+    print(f"[INFO] 正在连接模拟器 {serial} ...")
+
+    result = subprocess.run(
+        [ADB, "connect", serial],
+        capture_output=True, text=True, timeout=10
+    )
+    output = result.stdout.strip()
+    print(f"[INFO] adb connect 输出: {output}")
+
+    time.sleep(2)
+
+    check = get_connected_serial()
+    if not check:
+        print("[ERROR] 模拟器连接失败！请确认：")
+        print(f"  1. 模拟器已启动")
+        print(f"  2. ADB 端口正确（当前: {EMULATOR_PORT}）")
+        print()
+        print("  常见模拟器端口:")
+        print("    MuMu 12:  16384, 16416, 16448 (多开)")
+        print("    MuMu 旧版: 7555")
+        print("    雷电:      5555, 5557, 5559 (多开)")
+        print("    夜神:      62001, 62025, 62026 (多开)")
+        sys.exit(1)
+
+    print(f"[INFO] 模拟器连接成功: {check}")
+    return check
+
+
 def connect() -> tuple:
     """
     连接设备，返回 (device, poco, serial) 元组。
     根据 config.CONNECTION_MODE 选择连接方式。
     """
-    if CONNECTION_MODE == "wifi":
+    if CONNECTION_MODE == "emulator":
+        serial = _connect_emulator()
+    elif CONNECTION_MODE == "wifi":
         serial = _connect_wifi()
     else:
         serial = _connect_usb()

@@ -1,17 +1,21 @@
-"""B站 Demo 配置"""
+"""小红书 配置"""
 
 import os
 
 # App 配置
-PACKAGE_NAME = "tv.danmaku.bili"
-LAUNCH_ACTIVITY = "tv.danmaku.bili/.MainActivityV2"
+PACKAGE_NAME = "com.xingin.xhs"
+MAIN_ACTIVITY_KEYWORD = "IndexActivity"  # 判断是否在首页的关键词
 
-# 连接方式: "usb" 或 "wifi"
+# 连接方式: "usb" / "wifi" / "emulator"
 CONNECTION_MODE = "usb"
 
 # WiFi ADB 配置（CONNECTION_MODE="wifi" 时生效）
 WIFI_ADB_HOST = "192.168.43.1"
 WIFI_ADB_PORT = 5555
+
+# 模拟器配置（CONNECTION_MODE="emulator" 时生效）
+EMULATOR_HOST = "127.0.0.1"
+EMULATOR_PORT = 5555  # MuMu 开启了默认ADB端口
 
 # 遍历参数
 MAX_DEPTH = 8
@@ -36,19 +40,19 @@ POPUP_OCCLUSION_RATIO = 0.5
 SKIP_PERSONAL_PAGES = True
 # 遮挡弹窗跳过截图 —— 先关闭以保证遍历覆盖（弹窗仍会尝试关闭，只是不因此跳过截图）
 SKIP_BLOCKED_POPUPS = False
-PRIVACY_ACTIVITY_KEYWORDS = ["Space", "Profile", "MineActivity", "Account", "UserInfo"]
-PRIVACY_ID_KEYWORDS = ["space", "mine", "profile", "user_card", "personal", "user_space", "mine_header", "mine_layout"]
-PRIVACY_TEXT_KEYWORDS = ["个人主页", "我的主页", "编辑资料", "粉丝数", "获赞", "B币", "我的钱包", "我的收藏", "离线缓存", "历史记录", "我的关注", "我的粉丝"]
+PRIVACY_ACTIVITY_KEYWORDS = ["Profile", "MineActivity", "Account", "UserInfo", "PersonalInfo"]
+PRIVACY_ID_KEYWORDS = ["profile", "mine", "user_card", "personal", "user_info", "mine_header", "mine_layout"]
+PRIVACY_TEXT_KEYWORDS = ["个人主页", "编辑资料", "粉丝", "获赞", "我的钱包", "我的订单", "收藏", "浏览记录", "关注", "粉丝"]
 
 # 不可点击的控件文本（危险操作或无效操作）
 SKIP_TEXTS = [
     "发布", "拍摄", "直播", "充值", "开通",
-    "分享", "投币", "收藏", "转发",
+    "分享", "收藏", "转发",
     "删除", "举报", "拉黑", "+",
 ]
 
 # 需要跳过的Activity关键词（进入这些页面不截图不递归）
-SKIP_ACTIVITY_KEYWORDS = ["CenterPlus", "Publish", "Upload", "Editor", "Shoot", "Record", "LiveRoom"]
+SKIP_ACTIVITY_KEYWORDS = ["Publish", "Upload", "Editor", "Camera", "Shoot", "Record", "Live", "ImageCrop"]
 
 # 弹窗关闭关键词（含冷启动引导：跳过广告/同意隐私协议/青少年模式）
 POPUP_CLOSE_KEYWORDS = [
@@ -56,7 +60,7 @@ POPUP_CLOSE_KEYWORDS = [
     "暂不", "关闭", "不再提示", "稍后",
     "允许", "下次再说", "暂不更新",
     "skip", "Skip", "同意", "同意并继续", "知道了", "继续",
-    "关闭广告", "青少年",
+    "关闭广告", "青少年", "以后再说", "暂不升级",
 ]
 
 # 输出目录

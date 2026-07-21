@@ -1,9 +1,9 @@
 """
-B站 App 自动遍历截图 Demo
+App 自动遍历截图
 ============================
 
 使用方式:
-    1. USB 连接安卓真机（已安装并登录B站）
+    1. USB 连接安卓真机（已安装目标App）
     2. pip install -r requirements.txt
     3. python main.py
 
@@ -28,22 +28,20 @@ from core.traversal import TraversalEngine
 from core.popup_handler import handle_onboarding
 
 
-def launch_bilibili(serial: str):
-    """启动B站"""
-    # 先确保B站没在运行（干净启动）
+def launch_app(serial: str):
+    """启动目标App"""
     subprocess.run(
         [ADB, "-s", serial, "shell", "am", "force-stop", PACKAGE_NAME],
         capture_output=True, timeout=5
     )
     time.sleep(1)
 
-    # 启动
     subprocess.run(
         [ADB, "-s", serial, "shell", "monkey", "-p", PACKAGE_NAME,
          "-c", "android.intent.category.LAUNCHER", "1"],
         capture_output=True, timeout=5
     )
-    print("[INFO] 正在启动 B站...")
+    print(f"[INFO] 正在启动 {PACKAGE_NAME}...")
     time.sleep(4)
 
 
@@ -52,9 +50,9 @@ def main():
 
     print("=" * 50)
     if resume:
-        print("  B站 App 自动遍历截图 (继续模式)")
+        print(f"  {PACKAGE_NAME} 自动遍历截图 (继续模式)")
     else:
-        print("  B站 App 自动遍历截图 Demo")
+        print(f"  {PACKAGE_NAME} 自动遍历截图")
     print("=" * 50)
     print()
 
@@ -75,8 +73,8 @@ def main():
     # 3. 初始化 CSV
     init_csv()
 
-    # 4. 启动B站
-    launch_bilibili(serial)
+    # 4. 启动App
+    launch_app(serial)
 
     # 5. 处理冷启动引导（闪屏广告 / 隐私协议 / 青少年模式等）
     handle_onboarding(poco)
